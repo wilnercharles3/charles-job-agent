@@ -1,0 +1,35 @@
+name: Daily Job Scan
+
+on:
+  schedule:
+    - cron: '0 10 * * *'   # 10:00 UTC = 5:00 AM EST
+  workflow_dispatch:         # manual trigger for testing
+
+jobs:
+  run-autopilot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run autopilot job scanner
+        env:
+          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:        ${{ secrets.SUPABASE_KEY }}
+          GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
+          GMAIL_USER:          ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD:  ${{ secrets.GMAIL_APP_PASSWORD }}
+          ADZUNA_APP_ID:       ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY:      ${{ secrets.ADZUNA_APP_KEY }}
+          RAPIDAPI_KEY:        ${{ secrets.RAPIDAPI_KEY }}
+          SERPAPI_KEY:         ${{ secrets.SERPAPI_KEY }}
+        run: python autopilot.py
