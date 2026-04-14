@@ -2,19 +2,16 @@ import os
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from db import get_profile
 
 
-def send_welcome_email():
-    """Send a welcome email to the user after they save their profile."""
-    profile = get_profile()
-    if not profile:
-        print("No profile found, skipping welcome email.")
-        return
-
-    email = profile.get("email", "")
+def send_welcome_email(user_data):
+    """Send a welcome email to the user after they save their profile.
+    Args:
+        user_data: dict with keys name, email, target_titles, location_pref, min_salary, etc.
+    """
+    email = user_data.get("email", "")
     if not email:
-        print("No email in profile, skipping welcome email.")
+        print("No email in user data, skipping welcome email.")
         return
 
     gmail_user = os.getenv("GMAIL_USER", "")
@@ -23,11 +20,11 @@ def send_welcome_email():
         print("Gmail credentials missing, skipping welcome email.")
         return
 
-    first_name = profile.get("name", "there").split()[0]
-    titles = profile.get("target_titles", "Software Engineer")
+    first_name = user_data.get("name", "there").split()[0]
+    titles = user_data.get("target_titles", "Software Engineer")
     titles_str = titles if titles else "Software Engineer"
-    location = profile.get("location_pref", "Remote")
-    min_salary = profile.get("min_salary", 0)
+    location = user_data.get("location_pref", "Remote")
+    min_salary = user_data.get("min_salary", 0)
 
     html = """
     <html>
