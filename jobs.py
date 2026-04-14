@@ -225,8 +225,9 @@ def fetch_all_jobs(titles, locations):
     raw += fetch_jsearch(titles, locations)
     raw += fetch_serpapi_google_jobs(titles, locations)
     deduped = deduplicate(raw)
-    print(f"[jobs] Total: {len(raw)} raw -> {len(deduped)} deduped")
-    return deduped
+    validated = validate_jobs(deduped)
+    print(f"[jobs] Total: {len(raw)} raw -> {len(deduped)} deduped -> {len(validated)} validated")
+    return validated
 
 
 def deduplicate(jobs):
@@ -237,6 +238,65 @@ def deduplicate(jobs):
             seen.add(key)
             out.append(j)
     return out
+
+
+# Spam company names and patterns that indicate fake/training-program listings
+SPAM_COMPANIES = {
+    "revature", "smoothstack", "synergisticit", "tek systems", "teksystems",
+    "cybercoders spam", "dice staffing", "jobot spam",
+}
+
+SPAM_TITLE_WORDS = {
+    "training program", "unpaid", "volunteer", "internship unpaid",
+}
+
+
+def _has_valid_url(job):
+    """Check that the job has a real apply/view URL."""
+    url = job.get("url", "").strip()
+    if not url:
+        return False
+    if not url.startswith("http"):
+        return False
+    if len(url) < 15:
+        return False
+    return True
+
+
+def _is_legit_job(job):
+    """Filter out spam/fake/training-program listings."""
+    company = job.get("company", "").lower().strip()
+    title = job.get("title", "").lower().strip()
+
+    # Filter known spam companies
+    for spam in SPAM_COMPANIES:
+        if spam in company:
+            return False
+
+    # Filter spam title patterns
+    for spam in SPAM_TITLE_WORDS:
+        if spam in title:
+            return False
+
+    # Must have a real title and company
+    if not title or not company:
+        return False
+    if len(title) < 3 or len(company) < 2:
+        return False
+
+    return True
+
+
+def validate_jobs(jobs):
+    """Remove jobs without valid URLs or that look like spam."""
+    valid = []
+    for j in jobs:
+        if not _has_valid_url(j):
+            continue
+        if not _is_legit_job(j):
+            continue
+        valid.append(j)
+    return valid
 
 
 def pre_filter(jobs, titles):
