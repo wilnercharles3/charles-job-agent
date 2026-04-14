@@ -102,7 +102,7 @@ if submitted:
             st.balloons()
 
             try:
-                send_welcome_email()
+                send_welcome_email(user_data)
                 st.info("Welcome email sent! Check your inbox for tips on getting the best results.")
             except Exception:
                 pass
