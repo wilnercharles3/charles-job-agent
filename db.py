@@ -2,17 +2,17 @@
 db.py — Supabase client and profile operations.
 
 Shared module used by both app.py (Streamlit UI) and autopilot.py (daily scanner).
-Handles all database reads/writes for user profiles.
+Handles all database reads/writes for user profiles and sent-job tracking.
 """
 
 import os
+from datetime import datetime, timedelta, timezone
 from supabase import create_client
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Supabase Client ──────────────────────────────────────────────────────────
-
+# -- Supabase Client --------------------------------------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
@@ -22,8 +22,24 @@ supabase = (
     else None
 )
 
+# -- Profile Operations ------------------------------------------------------
 
-# ── Profile Operations ───────────────────────────────────────────────────────
+def is_new_user(email: str) -> bool:
+    """Return True if no profile exists yet for this email."""
+    if not supabase or not email:
+        return True
+    try:
+        result = (
+            supabase.table("profiles")
+            .select("email")
+            .eq("email", email.strip().lower())
+            .limit(1)
+            .execute()
+        )
+        return not bool(result.data)
+    except Exception:
+        return True
+
 
 def load_profile(email: str) -> dict:
     """Load a user profile by email. Returns dict or empty dict."""
@@ -46,7 +62,7 @@ def load_profile(email: str) -> dict:
 def save_profile(data: dict) -> bool:
     """Upsert a user profile. Returns True on success."""
     if not supabase:
-        print("[db] Supabase not configured — check .env file.")
+        print("[db] Supabase not configured.")
         return False
     try:
         data["email"] = data["email"].strip().lower()
@@ -55,7 +71,7 @@ def save_profile(data: dict) -> bool:
         ).execute()
         return True
     except Exception as e:
-        print(f"[db] Save failed for {data.get('email', '?')}: {e}")
+        print(f"[db] Save failed: {e}")
         return False
 
 
@@ -72,19 +88,24 @@ def load_all_profiles() -> list:
         return []
 
 
-# ── Sent Jobs Tracking ───────────────────────────────────────────────────────
+# -- Sent Jobs Tracking (with 14-day cooldown) -------------------------------
+
+DEDUP_DAYS = 14  # do not re-send a job within this many days
+
 
 def was_job_sent(email: str, title: str, company: str) -> bool:
-    """Check if a specific job was already emailed to this user."""
+    """Check if a job was emailed to this user in the last DEDUP_DAYS."""
     if not supabase:
         return False
     try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=DEDUP_DAYS)).isoformat()
         result = (
             supabase.table("sent_jobs")
             .select("id")
             .eq("user_email", email.strip().lower())
             .eq("job_title", title.strip().lower())
             .eq("company", company.strip().lower())
+            .gte("created_at", cutoff)
             .limit(1)
             .execute()
         )
@@ -114,7 +135,7 @@ def mark_jobs_sent(email: str, jobs: list) -> None:
 
 
 def filter_unsent_jobs(email: str, jobs: list) -> list:
-    """Return only jobs that haven't been emailed to this user yet."""
+    """Return only jobs not emailed to this user in the last DEDUP_DAYS."""
     return [
         job for job in jobs
         if not was_job_sent(email, job.get("title", ""), job.get("company", ""))
