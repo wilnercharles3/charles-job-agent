@@ -1,9 +1,15 @@
 """
 autopilot.py - Headless daily job scanner
 
-Runs standalone via GitHub Actions. Zero Streamlit imports.
+Runs standalone via GitHub Actions.  Zero Streamlit imports.
 Scans job boards, grades with AI, and emails results to each user.
 Imports shared modules: db.py, jobs.py, grader.py
+
+Field mapping note:
+  app.py saves: name, email, target_titles, location_pref, min_salary,
+                job_type, looking_for, dealbreakers, resume_summary
+  autopilot/grader expects: full_name, target_titles, preferred_locations, etc.
+  This module normalises both conventions so the pipeline works regardless.
 """
 
 import os
@@ -13,7 +19,6 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 from dotenv import load_dotenv
-
 from db import load_all_profiles, filter_unsent_jobs, mark_jobs_sent
 from jobs import fetch_all_jobs, pre_filter
 from grader import grade_all_jobs
@@ -21,27 +26,44 @@ from grader import grade_all_jobs
 load_dotenv()
 
 # -- Email credentials -------------------------------------------------------
-
-GMAIL_USER = os.environ["GMAIL_USER"]
-GMAIL_PASS = os.environ["GMAIL_APP_PASSWORD"]
+GMAIL_USER = os.environ.get("GMAIL_USER", "")
+GMAIL_PASS = os.environ.get("GMAIL_APP_PASSWORD", "")
 
 TODAY = date.today().strftime("%B %d, %Y")
 
+APP_URL = "https://charles-job-agent-9cpadgvzhra8g38wsrjecd.streamlit.app/"
+
+
+# -- Normalise profile fields ------------------------------------------------
+def normalise_profile(raw: dict) -> dict:
+    """Map app.py field names to the ones autopilot/grader expect."""
+    return {
+        "full_name": raw.get("full_name") or raw.get("name", ""),
+        "email": raw.get("email", ""),
+        "target_titles": raw.get("target_titles", ""),
+        "preferred_locations": raw.get("preferred_locations") or raw.get("location_pref", ""),
+        "min_salary": raw.get("min_salary", 0),
+        "job_type": raw.get("job_type", "Remote"),
+        "looking_for": raw.get("looking_for", ""),
+        "dealbreakers": raw.get("dealbreakers", ""),
+        "resume_summary": raw.get("resume_summary", ""),
+    }
+
 
 # -- Email Building ----------------------------------------------------------
-
 STAR_MAP = {
-    5: "\u2605\u2605\u2605\u2605\u2605",
-    4: "\u2605\u2605\u2605\u2605\u2606",
-    3: "\u2605\u2605\u2605\u2606\u2606",
-    2: "\u2605\u2605\u2606\u2606\u2606",
-    1: "\u2605\u2606\u2606\u2606\u2606",
+    5: "★★★★★",
+    4: "★★★★☆",
+    3: "★★★☆☆",
+    2: "★★☆☆☆",
+    1: "★☆☆☆☆",
 }
+
 LABEL_COLOR = {"STRATEGIC": "#1a8c4e", "PROFESSIONAL": "#1565c0"}
 
 
 def build_job_card(job: dict) -> str:
-    g = job["grade"]
+    g = job.get("grade", {})
     rating = g.get("rating", 0)
     label = g.get("label", "PROFESSIONAL")
     reason = g.get("reason", "")
@@ -85,9 +107,14 @@ def build_email_html(profile: dict, jobs: list) -> str:
         f'  <p style="font-size:14px;color:#555;">Here are your top-rated job matches. '
         f'Only roles scoring 3+ stars made the cut.</p>\n'
         f'  {cards}\n'
+        f'  <div style="text-align:center;margin:24px 0;">'
+        f'<a href="{APP_URL}" style="display:inline-block;background:#1a73e8;color:#fff;'
+        f'text-decoration:none;padding:12px 28px;border-radius:6px;font-size:15px;'
+        f'font-weight:bold;">Open Job Match Agent</a></div>\n'
         f'  <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">\n'
         f'  <p style="font-size:12px;color:#aaa;text-align:center;">'
-        f'Job Match Agent &mdash; automated daily scan by AI</p>\n'
+        f'Job Match Agent &mdash; automated daily scan by AI<br>'
+        f'<a href="{APP_URL}" style="color:#1a73e8;">{APP_URL}</a></p>\n'
         f'</div>\n</body>\n</html>'
     )
 
@@ -98,6 +125,7 @@ def send_email(to_addr: str, subject: str, html_body: str) -> None:
     msg["From"] = GMAIL_USER
     msg["To"] = to_addr
     msg.attach(MIMEText(html_body, "html"))
+
     with smtplib.SMTP("smtp.gmail.com", 587) as smtp:
         smtp.ehlo()
         smtp.starttls()
@@ -106,16 +134,21 @@ def send_email(to_addr: str, subject: str, html_body: str) -> None:
 
 
 # -- Main --------------------------------------------------------------------
-
 def run():
+    if not GMAIL_USER or not GMAIL_PASS:
+        print("[autopilot] Gmail credentials missing - cannot send emails.")
+        return
+
     print(f"[autopilot] Starting daily scan - {TODAY}")
 
-    profiles = load_all_profiles()
-    print(f"[autopilot] {len(profiles)} user profile(s) found")
+    raw_profiles = load_all_profiles()
+    print(f"[autopilot] {len(raw_profiles)} user profile(s) found")
 
-    for profile in profiles:
+    for raw in raw_profiles:
+        profile = normalise_profile(raw)
         email = profile.get("email", "")
         name = profile.get("full_name", email)
+
         print(f"[autopilot] Processing: {name} <{email}>")
 
         titles = [t.strip() for t in profile.get("target_titles", "").split(",") if t.strip()]
@@ -151,6 +184,7 @@ def run():
         # Send email
         html = build_email_html(profile, approved)
         subject = f"Your Daily Job Matches - {TODAY}"
+
         try:
             send_email(email, subject, html)
             print(f"[autopilot] Email sent to {email}")
