@@ -53,6 +53,7 @@ with st.form("profile_form"):
     job_type = st.selectbox("Job type", ["Remote", "On-site", "Hybrid"])
     looking_for = st.text_area("Tell us what you're looking for", placeholder="Describe your ideal role...")
     dealbreakers = st.text_area("Dealbreakers (optional)", placeholder="e.g. No commission-only, no night shifts")
+
     submitted = st.form_submit_button("Save My Profile", type="primary", use_container_width=True)
 
 if submitted:
@@ -83,33 +84,44 @@ if submitted:
                         st.warning(f"AI summary failed, profile still saved. Error: {ai_err}")
 
             user_data = {
-                "name": name, "email": email, "target_titles": titles,
-                "location_pref": location, "min_salary": salary, "job_type": job_type,
-                "looking_for": looking_for, "dealbreakers": dealbreakers,
+                "name": name,
+                "email": email,
+                "target_titles": titles,
+                "location_pref": location,
+                "min_salary": salary,
+                "job_type": job_type,
+                "looking_for": looking_for,
+                "dealbreakers": dealbreakers,
                 "resume_summary": resume_summary,
             }
+
             db.save_profile(user_data)
             st.session_state["profile_saved"] = True
             st.session_state["user_data"] = user_data
             st.success("Profile saved! You can now scan for jobs below.")
             st.balloons()
+
             try:
                 send_welcome_email()
                 st.info("Welcome email sent! Check your inbox for tips on getting the best results.")
             except Exception:
                 pass
+
         except Exception as e:
             st.error(f"Error saving profile: {e}")
             st.info("Check your Supabase secrets (SUPABASE_URL, SUPABASE_KEY).")
+
 
 if st.session_state.get("profile_saved"):
     st.divider()
     st.subheader("Instant Job Scan")
     st.write("Fetch and grade job listings based on your saved profile.")
+
     if st.button("Scan for Jobs Now", type="primary", use_container_width=True):
         ud = st.session_state["user_data"]
         title_list = [t.strip() for t in ud.get("target_titles", "").split(",") if t.strip()]
         loc_list = [l.strip() for l in ud.get("location_pref", "").split(",") if l.strip()]
+
         if not title_list:
             st.warning("No job titles found. Please update your profile above.")
         else:
@@ -119,11 +131,13 @@ if st.session_state.get("profile_saved"):
                 except Exception as e:
                     st.error(f"Error fetching jobs: {e}")
                     raw_jobs = []
+
             if raw_jobs:
                 st.write(f"Fetched {len(raw_jobs)} raw jobs. Filtering...")
                 jobs = pre_filter(raw_jobs, title_list)[:15]
             else:
                 jobs = []
+
             if not jobs:
                 st.warning("No jobs found. Try broader titles or add more title variations separated by commas.")
             else:
@@ -137,15 +151,20 @@ if st.session_state.get("profile_saved"):
                     "dealbreakers": ud.get("dealbreakers", ""),
                     "resume_summary": ud.get("resume_summary", ""),
                 }
+
                 progress = st.progress(0, text="Grading jobs...")
+
                 def on_progress(current, total):
                     progress.progress(current / total, text=f"Graded {current}/{total} jobs...")
+
                 try:
                     approved, graveyard = grade_all_jobs(jobs, profile_for_grader, on_progress=on_progress)
                 except Exception as e:
                     st.error(f"Grading error: {e}")
                     approved, graveyard = [], jobs
+
                 progress.empty()
+
                 if approved:
                     st.subheader(f"Top Matches ({len(approved)})")
                     for job in approved:
@@ -164,6 +183,7 @@ if st.session_state.get("profile_saved"):
                                 st.warning("Commission trap detected.")
                 else:
                     st.info("No jobs scored 3+ stars. Try broadening your titles or adjusting dealbreakers.")
+
                 if graveyard:
                     with st.expander(f"Skipped Jobs ({len(graveyard)})"):
                         for job in graveyard:
