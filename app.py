@@ -30,6 +30,17 @@ def extract_text_from_pdf(uploaded_file):
         return None
 
 
+def clean_description(desc, max_len=300):
+    """Return a cleaned snippet of the job description."""
+    if not desc:
+        return "No description available."
+    text = desc.replace("\n", " ").replace("\r", " ").strip()
+    text = " ".join(text.split())
+    if len(text) > max_len:
+        text = text[:max_len].rsplit(" ", 1)[0] + "..."
+    return text
+
+
 st.set_page_config(page_title="Job Match Agent", page_icon="briefcase", layout="centered")
 st.title("Job Match Agent")
 st.caption("Fill out your profile, save it, and then scan for matching jobs instantly.")
@@ -174,18 +185,34 @@ if st.session_state.get("profile_saved"):
                         reason = g.get("reason", "")
                         trap = g.get("commission_trap", False)
                         emoji = "\u2B50" if label == "STRATEGIC" else "\u2705"
-                        with st.expander(f"{emoji} {job.get('title','')} at {job.get('company','')} \u2014 {rating}/5 {label}"):
-                            st.write(f"**Location:** {job.get('location','N/A')} | **Source:** {job.get('source','')}")
-                            if job.get("url"):
-                                st.markdown(f"[Apply Here]({job.get('url')})")
-                            st.write(f"**Why:** {reason}")
+                        title_text = job.get("title", "Untitled")
+                        company_text = job.get("company", "Unknown")
+                        with st.expander(f"{emoji} {title_text} at {company_text} \u2014 {rating}/5 {label}"):
+                            col_a, col_b = st.columns([3, 1])
+                            with col_a:
+                                st.markdown(f"**Company:** {company_text}")
+                                st.markdown(f"**Location:** {job.get('location', 'N/A')}")
+                                st.markdown(f"**Source:** {job.get('source', 'Unknown')}")
+                            with col_b:
+                                if job.get("url"):
+                                    st.markdown(f"[\u27A1 Apply / View Job]({job.get('url')})")
+                            st.divider()
+                            st.markdown(f"**AI Assessment:** {reason}")
                             if trap:
-                                st.warning("Commission trap detected.")
+                                st.warning("\u26A0 Commission trap detected - base pay may be below 50% of total comp.")
+                            desc_snippet = clean_description(job.get("description", ""))
+                            if desc_snippet and desc_snippet != "No description available.":
+                                st.caption(f"**Preview:** {desc_snippet}")
+                            if job.get("url"):
+                                st.markdown(f"[Open full listing on {job.get('source', 'source')} \u2197]({job.get('url')})")
                 else:
                     st.info("No jobs scored 3+ stars. Try broadening your titles or adjusting dealbreakers.")
 
                 if graveyard:
-                    with st.expander(f"Skipped Jobs ({len(graveyard)})"):
+                    with st.expander(f"Skipped / Low-Rated Jobs ({len(graveyard)})"):
                         for job in graveyard:
                             g = job.get("grade", {})
-                            st.write(f"- **{job.get('title','')}** at {job.get('company','')} \u2014 {g.get('reason','No reason')}")
+                            rating = g.get("rating", 0)
+                            reason = g.get("reason", "No reason")
+                            link = f" \u2014 [View]({job.get('url')})" if job.get("url") else ""
+                            st.markdown(f"- **{job.get('title', '')}** at {job.get('company', '')} ({job.get('source', '')}) \u2014 {rating}/5 \u2014 {reason}{link}")
