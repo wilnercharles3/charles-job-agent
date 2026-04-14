@@ -1,8 +1,28 @@
+"""
+app.py - Streamlit cloud UI for Job Match Agent.
+
+UX Flow:
+  1. User fills out profile form (name, email, resume, preferences)
+  2. On submit: resume is summarized by AI, profile is saved to Supabase
+  3. After successful save: "Instant Job Scan" button appears
+  4. On scan: fetches jobs from 5 boards, grades with Gemini, displays results
+
+This file is the ONLY manual interaction point. Everything else is automated
+via autopilot.py + GitHub Actions (daily_scan.yml).
+
+DO NOT remove the profile form or the Supabase save logic.
+See AI_REFERENCE.md for full architecture and guardrails.
+"""
+
 import streamlit as st
 import PyPDF2
 import io
-import db  # Assuming your db.py handles Supabase
-import grader  # Assuming your grader.py handles Gemini
+import db
+import grader
+from jobs import fetch_all_jobs, pre_filter
+from grader import grade_all_jobs
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
 def extract_text_from_pdf(uploaded_file):
     try:
@@ -17,33 +37,42 @@ def extract_text_from_pdf(uploaded_file):
         st.error(f"PDF Extraction Error: {e}")
         return None
 
-st.title("Job Match Agent")
-st.write("Fill out your profile, save it, then search for jobs instantly.")
+# ── Page Config ──────────────────────────────────────────────────────────────
 
-# Form Layout
+st.set_page_config(page_title="Job Match Agent", page_icon="briefcase", layout="centered")
+st.title("Job Match Agent")
+st.caption("Fill out your profile, save it, and then scan for matching jobs instantly.")
+
+# ── Profile Form ─────────────────────────────────────────────────────────────
+
 with st.form("profile_form"):
+    st.subheader("Your Info")
     col1, col2 = st.columns(2)
     with col1:
         name = st.text_input("Full name")
+    with col2:
         email = st.text_input("Email address")
-    
+
     resume_file = st.file_uploader("Upload your resume (PDF or TXT)", type=["pdf", "txt"])
-    
+
     st.subheader("What You're Looking For")
-    titles = st.text_input("Job title(s) you're targeting")
-    location = st.text_input("Preferred location(s)")
-    salary = st.number_input("Minimum base salary (annual)", min_value=0, value=45000)
+    titles = st.text_input("Job title(s) you're targeting", placeholder="e.g. Data Analyst, Software Engineer")
+    location = st.text_input("Preferred location(s)", placeholder="e.g. New York, Remote")
+    salary = st.number_input("Minimum base salary (annual)", min_value=0, value=45000, step=5000)
     job_type = st.selectbox("Job type", ["Remote", "On-site", "Hybrid"])
-    looking_for = st.text_area("Tell us what you're looking for")
-    dealbreakers = st.text_area("Dealbreakers (optional)")
+    looking_for = st.text_area("Tell us what you're looking for", placeholder="Describe your ideal role...")
+    dealbreakers = st.text_area("Dealbreakers (optional)", placeholder="e.g. No commission-only, no night shifts")
 
-    submit_button = st.form_submit_button("Save My Profile")
+    submitted = st.form_submit_button("Save My Profile", type="primary", use_container_width=True)
 
-if submit_button:
+# ── Handle Form Submission ───────────────────────────────────────────────────
+
+if submitted:
     if not name or not email:
         st.warning("Please provide at least your name and email.")
     else:
         try:
+            # Extract resume text
             resume_text = ""
             resume_summary = "No resume provided"
 
@@ -53,16 +82,18 @@ if submit_button:
                 else:
                     resume_text = str(resume_file.read(), "utf-8")
 
+            # AI resume summarization
             if resume_text:
-                with st.spinner("Summarizing resume with AI..."):
-                    # Attempt AI summary, but don't let it crash the save
+                with st.spinner("Summarizing your resume with AI..."):
                     try:
                         resume_summary = grader.summarize_resume(resume_text)
+                        if not resume_summary:
+                            resume_summary = "Summary generation returned empty."
                     except Exception as ai_err:
                         resume_summary = "Summary generation failed."
-                        st.warning(f"AI Summary failed, but we'll try to save your profile anyway. Error: {ai_err}")
+                        st.warning(f"AI summary failed, but your profile will still be saved. Error: {ai_err}")
 
-            # Save to Supabase via your db.py module
+            # Build profile dict (matches db.py and grader.py expected keys)
             user_data = {
                 "name": name,
                 "email": email,
@@ -72,14 +103,91 @@ if submit_button:
                 "job_type": job_type,
                 "looking_for": looking_for,
                 "dealbreakers": dealbreakers,
-                "resume_summary": resume_summary
+                "resume_summary": resume_summary,
             }
 
+            # Save to Supabase
             db.save_profile(user_data)
-            st.success("\u2705 Profile saved successfully! You can now search for jobs.")
+
+            # Store in session state so Instant Scan can use it
+            st.session_state["profile_saved"] = True
+            st.session_state["user_data"] = user_data
+
+            st.success("Profile saved! You can now scan for jobs below.")
             st.balloons()
 
         except Exception as e:
-            # THIS IS THE KEY: It will tell you exactly what is failing (Supabase, PDF, etc.)
-            st.error(f"Critical Error: {e}")
-            st.info("Check your Streamlit Secrets for DB_URL and DB_KEY.")
+            st.error(f"Error saving profile: {e}")
+            st.info("Check your Supabase secrets (SUPABASE_URL, SUPABASE_KEY).")
+
+# ── Instant Job Scan (only after profile is saved) ───────────────────────────
+
+if st.session_state.get("profile_saved"):
+    st.divider()
+    st.subheader("Instant Job Scan")
+    st.write("Fetch and grade 5-10 job listings based on your saved profile.")
+
+    if st.button("Scan for Jobs Now", type="primary", use_container_width=True):
+        ud = st.session_state["user_data"]
+
+        # Parse titles and locations into lists for jobs.py
+        title_list = [t.strip() for t in ud.get("target_titles", "").split(",") if t.strip()]
+        loc_list = [l.strip() for l in ud.get("location_pref", "").split(",") if l.strip()]
+
+        if not title_list:
+            st.warning("No job titles found in your profile. Please update your profile above.")
+        else:
+            # 1. Fetch jobs
+            with st.spinner("Fetching jobs from 5 job boards..."):
+                raw_jobs = fetch_all_jobs(title_list, loc_list)
+                jobs = pre_filter(raw_jobs, title_list)[:10]
+
+            if not jobs:
+                st.info("No jobs found for your criteria. Try broader titles or locations.")
+            else:
+                st.write(f"Found {len(jobs)} jobs. Grading with AI...")
+
+                # 2. Build profile dict matching grader.py expected keys
+                profile_for_grader = {
+                    "full_name": ud.get("name", ""),
+                    "target_titles": ud.get("target_titles", ""),
+                    "preferred_locations": ud.get("location_pref", ""),
+                    "min_salary": ud.get("min_salary", 0),
+                    "looking_for": ud.get("looking_for", ""),
+                    "dealbreakers": ud.get("dealbreakers", ""),
+                    "resume_summary": ud.get("resume_summary", ""),
+                }
+
+                # 3. Grade jobs
+                progress = st.progress(0, text="Grading jobs...")
+
+                def on_progress(current, total):
+                    progress.progress(current / total, text=f"Graded {current}/{total} jobs...")
+
+                approved, graveyard = grade_all_jobs(jobs, profile_for_grader, on_progress=on_progress)
+                progress.empty()
+
+                # 4. Display results
+                if approved:
+                    st.subheader(f"Top Matches ({len(approved)})")
+                    for job in approved:
+                        g = job.get("grade", {})
+                        label = g.get("label", "N/A")
+                        rating = g.get("rating", 0)
+                        reason = g.get("reason", "")
+                        trap = g.get("commission_trap", False)
+
+                        icon = "star" if label == "STRATEGIC" else "thumbsup"
+                        with st.expander(f"{'\u2B50' if label == 'STRATEGIC' else '\u2705'} {job.get('title', '')} at {job.get('company', '')}  —  {rating}/5 {label}"):
+                            st.write(f"**Location:** {job.get('location', 'N/A')}  |  **Source:** {job.get('source', '')}")
+                            if job.get("url"):
+                                st.markdown(f"[Apply Here]({job.get('url')})")
+                            st.write(f"**Why:** {reason}")
+                            if trap:
+                                st.warning("Commission trap detected.")
+
+                if graveyard:
+                    with st.expander(f"Skipped Jobs ({len(graveyard)})"):
+                        for job in graveyard:
+                            g = job.get("grade", {})
+                            st.write(f"- **{job.get('title', '')}** at {job.get('company', '')} — {g.get('reason', 'No reason')}")
