@@ -1,146 +1,89 @@
-# AI Reference Guide — charles-job-agent
+# AI_REFERENCE.md - Context for AI assistants working on this project
 
-> **Purpose:** This document is a reference for AI assistants (Claude, Gemini, Copilot, etc.) working on this repo. Read this FIRST before making changes.
+## Project Overview
+Job Match Agent - A production Streamlit web app that searches 5 job boards,
+grades listings with Google Gemini AI, and emails daily job matches to users.
 
----
+**Live URL:** https://charles-job-agent-9cpadgvzhra8g38wsrjecd.streamlit.app/
+**Repo:** https://github.com/wilnercharles3/charles-job-agent
 
-## Architecture Overview
+## Architecture
+- **Frontend:** Streamlit (app.py) - hosted on Streamlit Cloud
+- **Database:** Supabase (PostgreSQL) - stores user profiles and sent-job history
+- **AI Grading:** Google Gemini 2.0 Flash (grader.py) - grades jobs 1-5 stars
+- **Email:** Gmail SMTP with App Password (welcome_email.py, autopilot.py)
+- **Job Sources:** Adzuna, The Muse, RemoteOK, JSearch (RapidAPI), Google Jobs (SerpAPI)
 
-This is a **cloud-only** job matching agent. There is no local setup required. It runs on:
+## Key Files
+| File | Purpose |
+|------|---------|
+| app.py | Streamlit UI - profile form + instant job scan |
+| jobs.py | Job fetchers for 5 boards + pre_filter + deduplicate |
+| grader.py | Gemini AI grading + resume summarization |
+| db.py | Supabase CRUD - save/load profiles, track sent jobs |
+| welcome_email.py | HTML welcome email sent after profile save |
+| autopilot.py | Daily scan script - fetch, grade, email top matches |
+| daily_scan.yml | GitHub Actions workflow for daily autopilot runs |
+| requirements.txt | Python dependencies |
 
-- **Streamlit Cloud** — hosts the user-facing web app (`app.py`)
-- **GitHub Actions** — runs the daily automated scan (`autopilot.py` via `daily_scan.yml`)
-- **Supabase** — stores user profiles and sent job tracking
-- **Gemini AI** — grades jobs and summarizes resumes
+## Environment Variables (Streamlit Secrets)
+All secrets stored in Streamlit Cloud Settings > Secrets (TOML format):
+- SUPABASE_URL, SUPABASE_KEY - Supabase connection
+- GEMINI_API_KEY - Google Gemini AI
+- ADZUNA_APP_ID, ADZUNA_APP_KEY - Adzuna job board
+- RAPIDAPI_KEY - JSearch via RapidAPI
+- SERPAPI_KEY - Google Jobs via SerpAPI
+- GMAIL_USER, GMAIL_APP_PASSWORD - Gmail SMTP for emails
 
-### File Map
+Code uses os.getenv() which Streamlit Cloud populates from top-level secrets.
 
-| File | Purpose | Touch carefully? |
-|------|---------|-----------------|
-| `app.py` | Streamlit UI: profile form + instant scan | YES |
-| `autopilot.py` | Daily cron job: fetch, grade, email top matches | YES |
-| `jobs.py` | Shared job fetchers (5 APIs), dedup, pre-filter | Moderate |
-| `grader.py` | Shared Gemini AI: resume summary + job grading | Moderate |
-| `db.py` | Shared Supabase client: profiles + sent_jobs | Moderate |
-| `daily_scan.yml` | GitHub Actions workflow (cron + manual trigger) | YES |
-| `requirements.txt` | Python deps for cloud deploy | Low risk |
-| `supabase_setup.sql` | Database schema reference | Read-only |
+## Critical Rules
+- DO NOT remove the profile form or the Supabase save logic
+- DO NOT hardcode values in form fields - use placeholders only
+- Resume section must have BOTH file upload AND paste text area options
+- Salary default must be 0 (not pre-filled)
+- Missing API keys should be handled gracefully (skip that source, don't crash)
+- welcome_email.py accepts user_data dict parameter (not no-args)
+- app.py calls send_welcome_email(user_data) after profile save
 
----
+## Function Signatures
+- `jobs.fetch_all_jobs(titles: list, locations: list) -> list[dict]`
+- `jobs.pre_filter(jobs: list, titles: list) -> list[dict]`
+- `grader.grade_all_jobs(jobs, profile, on_progress=None) -> (approved, graveyard)`
+- `grader.summarize_resume(text: str) -> str`
+- `db.save_profile(data: dict) -> bool`
+- `db.load_profile(email: str) -> dict`
+- `db.load_all_profiles() -> list`
+- `welcome_email.send_welcome_email(user_data: dict) -> bool`
 
-## UX Flow (app.py)
-
-1. User opens Streamlit app
-2. Fills out profile form: name, email, resume, job preferences
-3. Clicks **"Save My Profile"**
-4. Resume is summarized by Gemini AI in the background
-5. Profile + summary saved to Supabase
-6. **"Instant Job Scan"** button appears (ONLY after successful save)
-7. User clicks scan -> fetches from 5 job boards, grades with AI, shows results
-
-**The Instant Scan button must NEVER appear before the profile is saved.**
-
----
-
-## Function Signatures (CRITICAL — do not break these)
-
-### jobs.py
-
+## Job Dict Schema
+Each job returned by fetchers has these keys:
 ```python
-fetch_all_jobs(titles: list, locations: list) -> list[dict]
-# Each dict has: title, company, location, description, url, source
-
-pre_filter(jobs: list, titles: list) -> list[dict]
-
-deduplicate(jobs: list) -> list[dict]
+{"title": str, "company": str, "location": str, "description": str, "url": str, "source": str}
 ```
 
-### grader.py
+## Remote Job Handling
+- When location is "Remote"/"anywhere"/"wfh", fetchers skip location param
+- Adzuna: searches US-wide by title only (no where param)
+- The Muse: maps titles to predefined API categories
+- RemoteOK: matches individual keywords from titles
+- JSearch: appends "remote" to query
+- SerpAPI: appends "remote jobs" to query
 
-```python
-summarize_resume(resume_text: str) -> str
-
-grade_single(job: dict, profile: dict) -> dict
-# Returns: {rating, label, reason, commission_trap}
-
-grade_all_jobs(jobs: list, profile: dict, on_progress=None) -> tuple[list, list]
-# Returns: (approved_jobs, graveyard_jobs)
-# Profile dict keys: full_name, target_titles, preferred_locations,
-#   min_salary, looking_for, dealbreakers, resume_summary
+## GitHub Editor Warning
+When editing Python files via GitHub web editor, the CodeMirror 6 editor
+can mangle indentation. Always use the CodeMirror dispatch API:
+```javascript
+const view = document.querySelector('.cm-content').cmTile.view;
+view.dispatch({changes: {from: 0, to: view.state.doc.length, insert: newContent}});
 ```
+Never use the type tool for multi-line Python code in the GitHub editor.
 
-### db.py
-
-```python
-save_profile(user_data: dict)
-load_profile(email: str) -> dict
-list_profiles() -> list[dict]
-```
-
----
-
-## Key Mappings (app.py <-> grader.py)
-
-The profile form saves data with these keys to Supabase:
-`name, email, target_titles, location_pref, min_salary, job_type, looking_for, dealbreakers, resume_summary`
-
-The grader expects these keys:
-`full_name, target_titles, preferred_locations, min_salary, looking_for, dealbreakers, resume_summary`
-
-**app.py must map between these when calling grade_all_jobs.** See the `profile_for_grader` dict in app.py.
-
----
-
-## Automation (autopilot.py + daily_scan.yml)
-
-- Runs daily at **10:00 UTC (5:00 AM EST)** via GitHub Actions cron
-- Also has `workflow_dispatch` for manual triggers
-- Workflow: checkout -> setup Python 3.11 -> install deps -> run `autopilot.py`
-- autopilot.py loads ALL profiles from Supabase, fetches jobs, grades them, emails top matches
-- **DO NOT modify the cron schedule or the workflow without explicit permission**
-
-### Required GitHub Secrets
-
-`SUPABASE_URL`, `SUPABASE_KEY`, `GEMINI_API_KEY`, `GMAIL_USER`, `GMAIL_APP_PASSWORD`, `ADZUNA_APP_ID`, `ADZUNA_APP_KEY`, `RAPIDAPI_KEY`, `SERPAPI_KEY`
-
----
-
-## Checklist Before Committing Changes
-
-- [ ] **Does app.py still have the profile form?** (name, email, resume upload, preferences)
-- [ ] **Does the form still save to Supabase via db.save_profile()?**
-- [ ] **Does resume summarization still call grader.summarize_resume()?**
-- [ ] **Does the Instant Scan button only appear AFTER successful profile save?**
-- [ ] **Does Instant Scan use fetch_all_jobs() with list args, not strings?**
-- [ ] **Does Instant Scan pass the correct profile dict to grade_all_jobs()?**
-- [ ] **Is autopilot.py untouched?** (unless explicitly asked to change it)
-- [ ] **Is daily_scan.yml untouched?** (unless explicitly asked to change it)
-- [ ] **Does requirements.txt include all needed packages?**
-- [ ] **No hardcoded API keys anywhere?** (all from env vars / secrets)
-
----
-
-## Common Mistakes (Things That Broke Before)
-
-1. **Replacing the entire profile form with just a scan button** — This breaks the app because there is no way to set user data without the form. The scan depends on saved profile data.
-
-2. **Using wrong function signatures** — `fetch_all_jobs()` takes `(titles: list, locations: list)`, NOT a single string. You must split comma-separated user input into lists.
-
-3. **Mismatched profile dict keys** — `grader.py` expects `full_name` and `preferred_locations`, but `db.py` stores `name` and `location_pref`. Always map between them.
-
-4. **Breaking indentation** — Python is indent-sensitive. If using GitHub web editor, be careful with auto-indent. Use `document.execCommand('insertText')` via JS to bypass auto-indent when pasting.
-
-5. **Adding features that require local environment** — This app runs entirely in the cloud (Streamlit Cloud + GitHub Actions). Do not add features that require local file system access, local cron jobs, or local databases.
-
----
-
-## Adding New Features (Guidelines)
-
-- **New job boards**: Add a new `fetch_xxx()` function in `jobs.py`, add it to `fetch_all_jobs()`
-- **New profile fields**: Add to the form in `app.py`, update `supabase_setup.sql`, update `db.py`
-- **New grading criteria**: Modify the prompt templates in `grader.py`
-- **New UI sections**: Add them BELOW the existing form in `app.py`, never replace the form
-
----
-
-*Last updated: April 2026*
+## Status (Updated 2026-04-14)
+- App is LIVE and working on Streamlit Cloud
+- Profile save + Supabase integration: WORKING
+- Welcome email: WORKING (sends HTML email via Gmail SMTP)
+- Job fetching from 5 boards: WORKING (105 raw jobs in test)
+- Pre-filtering: WORKING (105 -> 15 relevant)
+- AI grading with Gemini: WORKING (some grading failures due to API limits)
+- Daily autopilot emails: configured via GitHub Actions (daily_scan.yml)
