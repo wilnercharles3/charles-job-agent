@@ -3,6 +3,8 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+APP_URL = "https://charles-job-agent-9cpadgvzhra8g38wsrjecd.streamlit.app/"
+
 
 def send_welcome_email(user_data):
     """Send a welcome email to the user after they save their profile.
@@ -102,9 +104,17 @@ def send_welcome_email(user_data):
     </table>
     </td></tr>
 
+    <!-- CTA BUTTON -->
+    <tr><td style="padding:20px 30px;text-align:center;">
+    <a href="""" + APP_URL + """" style="display:inline-block;background:#1a73e8;color:#ffffff;text-decoration:none;padding:14px 32px;border-radius:6px;font-size:16px;font-weight:bold;">Open Job Match Agent</a>
+    <p style="color:#999;font-size:12px;margin:10px 0 0;">Scan for jobs, update your profile, or adjust your preferences anytime.</p>
+    </td></tr>
+
     <!-- FOOTER -->
     <tr><td style="background:#f8f9fa;padding:20px 30px;text-align:center;border-top:1px solid #e0e0e0;">
-    <p style="color:#999;font-size:12px;margin:0;">Job Match Agent | Powered by AI</p>
+    <p style="color:#999;font-size:12px;margin:0;">
+    Job Match Agent | <a href="""" + APP_URL + """" style="color:#1a73e8;text-decoration:none;">""" + APP_URL + """</a>
+    </p>
     </td></tr>
 
     </table>
