@@ -66,9 +66,13 @@ def save_profile(data: dict) -> bool:
         return False
     try:
         data["email"] = data["email"].strip().lower()
-        supabase.table("profiles").upsert(
+        result = supabase.table("profiles").upsert(
             data, on_conflict="email"
         ).execute()
+        if not result.data:
+            print(f"[db] Save returned empty for {data.get('email')}. "
+                  "Check RLS policies and column names.")
+            return False
         return True
     except Exception as e:
         print(f"[db] Save failed: {e}")
@@ -105,12 +109,13 @@ def was_job_sent(email: str, title: str, company: str) -> bool:
             .eq("user_email", email.strip().lower())
             .eq("job_title", title.strip().lower())
             .eq("company", company.strip().lower())
-            .gte("created_at", cutoff)
+            .gte("sent_at", cutoff)
             .limit(1)
             .execute()
         )
         return bool(result.data)
-    except Exception:
+    except Exception as e:
+        print(f"[db] was_job_sent error: {e}")
         return False
 
 

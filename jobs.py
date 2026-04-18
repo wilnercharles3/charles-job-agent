@@ -130,7 +130,7 @@ def fetch_remoteok(titles):
                         "company": j.get("company", ""),
                         "location": j.get("location", "Remote"),
                         "description": j.get("description", "")[:800],
-                        "url": j.get("url", ""),
+                        "url": j.get("apply_url") or j.get("url", ""),
                         "source": "RemoteOK",
                     })
     except Exception as e:
@@ -164,12 +164,15 @@ def fetch_jsearch(titles, locations):
                     city = j.get("job_city", "") or ""
                     state = j.get("job_state", "") or ""
                     loc = f"{city}, {state}".strip(", ") or ("Remote" if j.get("job_is_remote") else "Unknown")
+                    url = j.get("job_apply_link") or j.get("job_google_link") or ""
+                    if not url:
+                        continue
                     jobs.append({
                         "title": j.get("job_title", ""),
                         "company": j.get("employer_name", ""),
                         "location": loc,
                         "description": j.get("job_description", "")[:800],
-                        "url": j.get("job_apply_link", ""),
+                        "url": url,
                         "source": "JSearch",
                     })
         except Exception as e:
@@ -200,8 +203,17 @@ def fetch_serpapi_google_jobs(titles, locations):
             )
             if r.status_code == 200:
                 for j in r.json().get("jobs_results", []):
-                    rl = j.get("related_links", [])
-                    url = rl[0].get("link", "") if rl else ""
+                    apply_opts = j.get("apply_options", []) or []
+                    url = ""
+                    if apply_opts:
+                        url = apply_opts[0].get("link", "") or ""
+                    if not url:
+                        url = j.get("share_link", "") or ""
+                    if not url:
+                        rl = j.get("related_links", []) or []
+                        url = rl[0].get("link", "") if rl else ""
+                    if not url:
+                        continue
                     jobs.append({
                         "title": j.get("title", ""),
                         "company": j.get("company_name", ""),
@@ -226,8 +238,10 @@ def fetch_all_jobs(titles, locations):
     raw += fetch_serpapi_google_jobs(titles, locations)
     deduped = deduplicate(raw)
     validated = validate_jobs(deduped)
-    print(f"[jobs] Total: {len(raw)} raw -> {len(deduped)} deduped -> {len(validated)} validated")
-    return validated
+    alive = check_link_health(validated)
+    print(f"[jobs] Total: {len(raw)} raw -> {len(deduped)} deduped -> "
+          f"{len(validated)} validated -> {len(alive)} alive")
+    return alive
 
 
 def deduplicate(jobs):
@@ -252,14 +266,23 @@ SPAM_TITLE_WORDS = {
 
 
 def _has_valid_url(job):
-    """Check that the job has a real apply/view URL."""
     url = job.get("url", "").strip()
     if not url:
         return False
-    if not url.startswith("http"):
+    if not url.startswith(("http://", "https://")):
         return False
-    if len(url) < 15:
+    if len(url) < 20:
         return False
+    bad_patterns = [
+        "google.com/search",
+        "/search?",
+        "linkedin.com/jobs/search",
+        "indeed.com/jobs?",
+    ]
+    lower = url.lower()
+    for p in bad_patterns:
+        if p in lower:
+            return False
     return True
 
 
@@ -297,6 +320,47 @@ def validate_jobs(jobs):
             continue
         valid.append(j)
     return valid
+
+
+def check_link_health(jobs, timeout=5, max_workers=10):
+    """HEAD (with GET fallback) each job URL; drop anything that 4xx/5xx
+    or fails to connect. Runs in parallel."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _is_alive(url):
+        try:
+            r = requests.head(
+                url, timeout=timeout, allow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 (job-agent link-check)"},
+            )
+            if r.status_code == 405 or r.status_code >= 400:
+                r = requests.get(
+                    url, timeout=timeout, allow_redirects=True, stream=True,
+                    headers={"User-Agent": "Mozilla/5.0 (job-agent link-check)"},
+                )
+                r.close()
+            return 200 <= r.status_code < 400
+        except Exception:
+            return False
+
+    if not jobs:
+        return jobs
+
+    alive = []
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_is_alive, j.get("url", "")): j for j in jobs}
+        for future in as_completed(futures):
+            job = futures[future]
+            try:
+                if future.result():
+                    alive.append(job)
+            except Exception:
+                pass
+    dropped = len(jobs) - len(alive)
+    if dropped:
+        print(f"[jobs] Link health: dropped {dropped} dead links "
+              f"({len(alive)}/{len(jobs)} alive)")
+    return alive
 
 
 def pre_filter(jobs, titles):

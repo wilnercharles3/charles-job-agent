@@ -87,7 +87,7 @@ def _build_job_card_html(job):
 
 def _build_scan_email(user_data, approved_jobs):
     """Build HTML email body for instant scan results."""
-    name = user_data.get("name", "there").split()[0]
+    name = user_data.get("full_name", "there").split()[0]
     today = date.today().strftime("%B %d, %Y")
     cards = ""
     for job in approved_jobs:
@@ -201,17 +201,24 @@ if submitted:
                                    + str(ai_err))
 
             user_data = {
-                "name": name,
+                "full_name": name,
                 "email": email,
                 "target_titles": titles,
-                "location_pref": location,
+                "preferred_locations": location,
                 "min_salary": salary,
                 "job_type": job_type,
                 "looking_for": looking_for,
                 "dealbreakers": dealbreakers,
                 "resume_summary": resume_summary,
+                "resume_text": resume_text,
             }
-            db.save_profile(user_data)
+            if not db.save_profile(user_data):
+                st.error(
+                    "Profile could not be saved to the database. "
+                    "Check Streamlit secrets (SUPABASE_URL, SUPABASE_KEY) and "
+                    "that the 'profiles' table exists with the expected columns."
+                )
+                st.stop()
             st.session_state["profile_saved"] = True
             st.session_state["user_data"] = user_data
 
@@ -241,7 +248,7 @@ if st.session_state.get("profile_saved"):
         user_email = ud.get("email", "")
         title_list = [t.strip() for t in ud.get("target_titles", "").split(",")
                       if t.strip()]
-        loc_list = [l.strip() for l in ud.get("location_pref", "").split(",")
+        loc_list = [l.strip() for l in ud.get("preferred_locations", "").split(",")
                     if l.strip()]
 
         if not title_list:
@@ -269,9 +276,9 @@ if st.session_state.get("profile_saved"):
             else:
                 st.write("Found " + str(len(jobs)) + " new jobs. Grading with AI...")
                 profile_for_grader = {
-                    "full_name": ud.get("name", ""),
+                    "full_name": ud.get("full_name", ""),
                     "target_titles": ud.get("target_titles", ""),
-                    "preferred_locations": ud.get("location_pref", ""),
+                    "preferred_locations": ud.get("preferred_locations", ""),
                     "min_salary": ud.get("min_salary", 0),
                     "looking_for": ud.get("looking_for", ""),
                     "dealbreakers": ud.get("dealbreakers", ""),
