@@ -295,12 +295,19 @@ if st.session_state.get("profile_saved"):
                                       text="Graded " + str(current) + "/" + str(total) + " jobs...")
 
                 try:
-                    approved, graveyard = grade_all_jobs(
+                    approved, graveyard, quota_exhausted = grade_all_jobs(
                         jobs, profile_for_grader, on_progress=on_progress)
                 except Exception as e:
                     st.error("Grading error: " + str(e))
-                    approved, graveyard = [], jobs
+                    approved, graveyard, quota_exhausted = [], jobs, False
                 progress.empty()
+
+                if quota_exhausted:
+                    st.warning(
+                        "Our AI grader is temporarily rate-limited "
+                        "(Gemini free-tier quota exhausted). "
+                        "Try again in a few minutes."
+                    )
 
                 if approved:
                     # Mark these jobs as sent + email results

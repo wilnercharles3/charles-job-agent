@@ -174,8 +174,12 @@ def run():
             continue
 
         # Grade with AI
-        approved, graveyard = grade_all_jobs(jobs, profile)
+        approved, graveyard, quota_exhausted = grade_all_jobs(jobs, profile)
         print(f"[autopilot] {len(approved)} approved, {len(graveyard)} rejected for {name}")
+
+        if quota_exhausted:
+            print(f"[autopilot] Gemini quota exhausted - skipping remaining users.")
+            break
 
         if not approved:
             print(f"[autopilot] No strong matches - skipping email for {name}")
