@@ -6,28 +6,45 @@ from email.mime.multipart import MIMEMultipart
 APP_URL = "https://charles-job-agent-9cpadgvzhra8g38wsrjecd.streamlit.app/"
 
 
-def send_welcome_email(user_data):
-    """Send a welcome email to the user after they save their profile.
-
-    Args:
-        user_data: dict with keys name, email, target_titles, location_pref,
-                   min_salary, etc.
-    """
-    email = user_data.get("email", "")
-    if not email:
-        print("No email in user data, skipping welcome email.")
-        return
-
+def _send_mail(to_addr: str, subject: str, html: str) -> bool:
+    """Send an HTML email via Gmail SMTP_SSL. Returns True on success."""
     gmail_user = os.getenv("GMAIL_USER", "")
     gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "")
     if not gmail_user or not gmail_pass:
-        print("Gmail credentials missing, skipping welcome email.")
-        return
+        print("Gmail credentials missing, skipping email.")
+        return False
+    if not to_addr:
+        print("No recipient address, skipping email.")
+        return False
 
-    first_name = user_data.get("name", "there").split()[0]
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = gmail_user
+    msg["To"] = to_addr
+    msg.attach(MIMEText(html, "html"))
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(gmail_user, gmail_pass)
+            server.sendmail(gmail_user, to_addr, msg.as_string())
+        print(f"Email sent to {to_addr}: {subject}")
+        return True
+    except Exception as e:
+        print(f"Email error ({subject}): {e}")
+        return False
+
+
+def send_welcome_email(user_data):
+    """Send a welcome email to a first-time user after they save their profile."""
+    email = user_data.get("email", "")
+    if not email:
+        print("No email in user data, skipping welcome email.")
+        return False
+
+    first_name = user_data.get("full_name", "there").split()[0]
     titles = user_data.get("target_titles", "Software Engineer")
     titles_str = titles if titles else "Software Engineer"
-    location = user_data.get("location_pref", "Remote")
+    location = user_data.get("preferred_locations", "Remote")
     min_salary = user_data.get("min_salary", 0)
     salary_str = f"{min_salary:,}" if min_salary else "0"
 
@@ -116,18 +133,62 @@ def send_welcome_email(user_data):
 </body>
 </html>"""
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = "Welcome to Job Match Agent!"
-    msg["From"] = gmail_user
-    msg["To"] = email
-    msg.attach(MIMEText(html, "html"))
+    return _send_mail(email, "Welcome to Job Match Agent!", html)
 
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(gmail_user, gmail_pass)
-            server.sendmail(gmail_user, email, msg.as_string())
-        print(f"Welcome email sent to {email}")
-        return True
-    except Exception as e:
-        print(f"Welcome email error: {e}")
+
+def send_profile_update_email(user_data):
+    """Send a short confirmation email to a returning user after a profile update."""
+    email = user_data.get("email", "")
+    if not email:
+        print("No email in user data, skipping update email.")
         return False
+
+    first_name = user_data.get("full_name", "there").split()[0]
+    titles = user_data.get("target_titles", "") or "(not set)"
+    location = user_data.get("preferred_locations", "") or "(not set)"
+    min_salary = user_data.get("min_salary", 0)
+    salary_str = f"${min_salary:,}" if min_salary else "Any"
+    job_type = user_data.get("job_type", "") or "(not set)"
+
+    html = f"""<html>
+<body style="margin:0;padding:0;font-family:Arial,Helvetica,sans-serif;background:#f4f4f4;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f4;padding:20px 0;">
+<tr><td align="center">
+<table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px;overflow:hidden;">
+
+<tr><td style="background:#1a73e8;padding:18px 26px;">
+  <h1 style="color:#ffffff;margin:0;font-size:18px;">Job Match Agent</h1>
+  <p style="color:#cfe0ff;margin:2px 0 0;font-size:12px;">Profile updated</p>
+</td></tr>
+
+<tr><td style="padding:22px 30px 6px;">
+  <p style="color:#333;font-size:15px;margin:0 0 6px;">Hi {first_name},</p>
+  <p style="color:#555;font-size:14px;line-height:1.5;margin:0;">Your profile is updated. Your next scan will use these settings:</p>
+</td></tr>
+
+<tr><td style="padding:14px 30px;">
+  <table width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #e0e0e0;border-radius:6px;font-size:14px;color:#333;">
+    <tr style="background:#f8f9fa;"><td width="35%"><b>Job titles</b></td><td>{titles}</td></tr>
+    <tr><td><b>Location</b></td><td>{location}</td></tr>
+    <tr style="background:#f8f9fa;"><td><b>Min salary</b></td><td>{salary_str}</td></tr>
+    <tr><td><b>Job type</b></td><td>{job_type}</td></tr>
+  </table>
+</td></tr>
+
+<tr><td style="padding:10px 30px 22px;text-align:center;">
+  <a href="{APP_URL}" style="display:inline-block;background:#1a73e8;color:#ffffff;text-decoration:none;padding:10px 22px;border-radius:5px;font-size:14px;font-weight:bold;">Open Job Match Agent</a>
+</td></tr>
+
+<tr><td style="background:#f8f9fa;padding:14px 30px;text-align:center;border-top:1px solid #e0e0e0;">
+  <p style="color:#999;font-size:11px;margin:0;">
+    Job Match Agent |
+    <a href="{APP_URL}" style="color:#1a73e8;text-decoration:none;">{APP_URL}</a>
+  </p>
+</td></tr>
+
+</table>
+</td></tr></table>
+</body>
+</html>"""
+
+    return _send_mail(email, "Your Job Match Agent profile was updated", html)

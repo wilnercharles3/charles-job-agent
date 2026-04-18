@@ -21,7 +21,7 @@ import db
 import grader
 from jobs import fetch_all_jobs, pre_filter
 from grader import grade_all_jobs
-from welcome_email import send_welcome_email
+from welcome_email import send_welcome_email, send_profile_update_email
 from db import is_new_user, mark_jobs_sent, filter_unsent_jobs
 
 APP_URL = "https://charles-job-agent-9cpadgvzhra8g38wsrjecd.streamlit.app/"
@@ -232,6 +232,10 @@ if submitted:
                     pass
             else:
                 st.success("Profile updated! You can scan for jobs below.")
+                try:
+                    send_profile_update_email(user_data)
+                except Exception:
+                    pass  # Non-fatal — profile was saved successfully
 
         except Exception as e:
             st.error("Error saving profile: " + str(e))
