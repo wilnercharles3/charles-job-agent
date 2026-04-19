@@ -206,8 +206,14 @@ def summarize_resume(resume_text: str) -> str:
 # -- Single Job Grading ------------------------------------------------------
 
 def _build_grade_prompt(job: dict, profile: dict) -> str:
-    """Build the grading prompt for a single job."""
-    name = profile.get("full_name", "the user")
+    """Build the rich-scoring prompt for a single job.
+
+    Returns a structured match analysis that feels personal — the narrative
+    references specific things from the candidate's resume to come off as
+    hand-picked, not algorithmic.
+    """
+    name = profile.get("full_name", "the candidate")
+    first_name = name.split()[0] if name and name.strip() else "the candidate"
     titles = profile.get("target_titles", "")
     locations = profile.get("preferred_locations", "")
     salary = profile.get("min_salary", 0)
@@ -215,9 +221,43 @@ def _build_grade_prompt(job: dict, profile: dict) -> str:
     dealbreakers = profile.get("dealbreakers", "")
     resume_summary = profile.get("resume_summary", "")
 
-    return f"""You are an expert job matching advisor. Grade this job for {name}.
+    return f"""You are an expert job-matching advisor writing a personalized \
+assessment for {first_name}. Grade this job against the candidate profile and \
+return ONLY valid JSON, no markdown fences:
+
+{{
+  "match_score": integer 0-100 overall fit (see scoring guide below),
+  "match_reasons": ["2 to 3 specific reasons this role fits THIS candidate. \
+Each reason MUST reference a concrete detail from their resume — a company \
+name, tool, industry, or years of experience (e.g. 'Requires enterprise \
+territory management — matches your 7 years at Rentokil'). NOT generic \
+('you have relevant experience')."],
+  "caution_flags": ["0 to 2 honest concerns. Examples: 'base salary may be \
+below your $120k floor', 'startup with no public funding info', 'requires \
+on-site work in a location you did not list'. Use an empty list [] if none."],
+  "role_summary": "one plain-English sentence describing what the role \
+actually involves day-to-day (not just the job title)",
+  "narrative": "2-3 sentences written TO the candidate in second person \
+('This role aligns with your 8 years at Acme managing enterprise \
+accounts...'). MUST reference specific tools, companies, or roles from their \
+resume to feel hand-picked. Highlight the most exciting aspect for someone \
+with their background."
+}}
+
+SCORING GUIDE:
+- 90-100: rare exceptional fit; strong match on role, domain, tools, seniority, and compensation signals
+- 75-89: strong fit; clear alignment on most dimensions
+- 50-74: reasonable fit; some alignment but notable gaps
+- 25-49: weak fit; limited overlap with background or preferences
+- 0-24: poor fit; major mismatches
+
+RULES:
+- If any dealbreaker is clearly violated, cap match_score at 25 and name the violated dealbreaker in caution_flags.
+- If base salary appears to be less than 50% of total comp (commission trap), add that to caution_flags.
+- Never invent specifics from the resume that aren't there — if you don't have enough resume detail, say so in a caution_flag and keep the narrative shorter/more generic.
 
 CANDIDATE PROFILE:
+- Name: {name}
 - Targeting roles: {titles}
 - Preferred locations: {locations}
 - Minimum base salary: ${salary:,}
@@ -230,36 +270,37 @@ JOB LISTING:
 - Company: {job.get('company', '')}
 - Location: {job.get('location', '')}
 - Source: {job.get('source', '')}
-- Description: {job.get('description', '')}
-
-GRADING RULES:
-1. Rate 1-5 based on how well this job matches the candidate.
-2. Label as STRATEGIC (strong match, 4-5), PROFESSIONAL (decent match, 3), or SKIP (poor match, 1-2).
-3. COMMISSION TRAP: If base salary appears less than 50% of total comp, set commission_trap to true.
-4. If any dealbreaker is clearly violated, rate 1-2 and label SKIP.
-5. For the reason field:
-   - STRATEGIC (4-5): Be enthusiastic and specific about why this is a great fit.
-   - PROFESSIONAL (3): Encouraging but honest about gaps.
-   - SKIP (1-2): Brief and clear about why it does not match.
-
-Return ONLY valid JSON, no markdown fences:
-{{\"rating\": 1-5, \"label\": \"STRATEGIC|PROFESSIONAL|SKIP\", \"reason\": \"your detailed assessment\", \"commission_trap\": true|false}}"""
+- Description: {job.get('description', '')}"""
 
 
+# Minimum match_score to route a job to the "approved" list (vs graveyard).
+# 50 is looser than the old rating-3-of-5 threshold — user preference.
+APPROVAL_THRESHOLD = 50
+
+
+# Fallback grade dicts — returned when LLM can't respond (quota, error, no key).
+# Shape matches what the LLM returns on success so display code can treat every
+# job["grade"] uniformly.
 RATE_LIMITED_GRADE = {
-    "rating": 0, "label": "SKIP",
-    "reason": "AI grader is temporarily rate-limited. Try again in a few minutes.",
-    "commission_trap": False,
+    "match_score": 0,
+    "match_reasons": [],
+    "caution_flags": ["AI grader is temporarily rate-limited. Try again in a few minutes."],
+    "role_summary": "",
+    "narrative": "",
 }
 FAILED_GRADE = {
-    "rating": 0, "label": "SKIP",
-    "reason": "Grading failed.",
-    "commission_trap": False,
+    "match_score": 0,
+    "match_reasons": [],
+    "caution_flags": ["AI grader couldn't assess this role (parse error)."],
+    "role_summary": "",
+    "narrative": "",
 }
 UNCONFIGURED_GRADE = {
-    "rating": 0, "label": "SKIP",
-    "reason": "AI grader not configured.",
-    "commission_trap": False,
+    "match_score": 0,
+    "match_reasons": [],
+    "caution_flags": ["AI grader not configured (missing GEMINI_API_KEY)."],
+    "role_summary": "",
+    "narrative": "",
 }
 
 
@@ -292,8 +333,9 @@ def grade_single(job: dict, profile: dict) -> dict:
 # -- Batch Grading -----------------------------------------------------------
 
 def _build_batch_prompt(jobs_batch: list, profile: dict) -> str:
-    """Build a prompt that grades multiple jobs at once."""
-    name = profile.get("full_name", "the user")
+    """Build a rich-scoring prompt that grades multiple jobs in one LLM call."""
+    name = profile.get("full_name", "the candidate")
+    first_name = name.split()[0] if name and name.strip() else "the candidate"
     titles = profile.get("target_titles", "")
     locations = profile.get("preferred_locations", "")
     salary = profile.get("min_salary", 0)
@@ -312,27 +354,44 @@ JOB {i + 1}:
 - Description: {job.get('description', '')}
 """
 
-    return f"""You are an expert job matching advisor. Grade these {len(jobs_batch)} jobs for {name}.
+    return f"""You are an expert job-matching advisor writing personalized \
+assessments for {first_name}. Grade these {len(jobs_batch)} jobs and return \
+ONLY a valid JSON array (no markdown fences), one object per job in the same \
+order they appear below. Each object must have exactly these keys:
+
+{{
+  "match_score": integer 0-100 overall fit,
+  "match_reasons": ["2-3 specific reasons this fits THIS candidate, each \
+referencing a concrete detail from their resume (company, tool, years, \
+industry) — NOT generic phrasing"],
+  "caution_flags": ["0-2 honest concerns. Empty list [] if none."],
+  "role_summary": "one sentence describing what the role actually involves",
+  "narrative": "2-3 sentences written TO the candidate in second person \
+('This role aligns with your...'). MUST reference specific resume details \
+(tools, companies, roles) to feel hand-picked."
+}}
+
+SCORING GUIDE:
+- 90-100: rare exceptional fit
+- 75-89: strong fit on most dimensions
+- 50-74: reasonable fit with notable gaps
+- 25-49: weak fit
+- 0-24: poor fit
+
+RULES:
+- If any dealbreaker is clearly violated, cap match_score at 25 and name the violated dealbreaker in caution_flags.
+- If base salary appears less than 50% of total comp (commission trap), add that to caution_flags.
+- Don't invent resume specifics. If you lack resume detail, keep the narrative generic and note the missing info in a caution_flag.
 
 CANDIDATE PROFILE:
+- Name: {name}
 - Targeting roles: {titles}
 - Preferred locations: {locations}
 - Minimum base salary: ${salary:,}
 - What they want: {looking_for}
 - Dealbreakers: {dealbreakers}
 - Resume summary: {resume_summary}
-
-{jobs_text}
-
-GRADING RULES:
-1. Rate each job 1-5 based on match quality.
-2. Label as STRATEGIC (4-5), PROFESSIONAL (3), or SKIP (1-2).
-3. COMMISSION TRAP: If base salary appears less than 50% of total comp, set commission_trap to true.
-4. If any dealbreaker is violated, rate 1-2 and SKIP.
-5. For reasons: STRATEGIC = enthusiastic and specific. PROFESSIONAL = encouraging but honest. SKIP = brief and clear.
-
-Return ONLY a JSON array with one object per job, in order:
-[{{\"rating\": 1-5, \"label\": \"STRATEGIC|PROFESSIONAL|SKIP\", \"reason\": \"assessment\", \"commission_trap\": true|false}}, ...]"""
+{jobs_text}"""
 
 
 def grade_batch(jobs_batch: list, profile: dict) -> list:
@@ -383,10 +442,10 @@ def grade_all_jobs(jobs: list, profile: dict, on_progress=None) -> tuple:
 
         for job, grade in zip(batch, grades):
             job["grade"] = grade
-            rating = grade.get("rating", 0)
-            is_trap = grade.get("commission_trap", False)
+            score = grade.get("match_score", 0)
 
-            if is_trap or rating < 3:
+            # caution_flags are informational only — they don't gate approval
+            if score < APPROVAL_THRESHOLD:
                 graveyard.append(job)
             else:
                 approved.append(job)
@@ -405,7 +464,7 @@ def grade_all_jobs(jobs: list, profile: dict, on_progress=None) -> tuple:
         if i + BATCH_SIZE < total:
             time.sleep(GRADE_DELAY)
 
-    # Sort approved: highest rated first
-    approved.sort(key=lambda j: j["grade"].get("rating", 0), reverse=True)
+    # Sort approved: highest match_score first
+    approved.sort(key=lambda j: j["grade"].get("match_score", 0), reverse=True)
 
     return approved, graveyard, _quota_dead

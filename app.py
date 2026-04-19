@@ -59,32 +59,86 @@ def clean_description(desc, max_len=300):
 # -- Instant scan email builder --------------------------------------------
 
 
+def _score_color(score: int) -> str:
+    """Color band for the match-score badge."""
+    if score >= 85:
+        return "#1a8c4e"  # green
+    if score >= 65:
+        return "#1565c0"  # blue
+    return "#8a6d3b"      # olive/amber
+
+
 def _build_job_card_html(job):
-    """Build one HTML card for a graded job."""
+    """Build one HTML card for a graded job (for scan/daily emails)."""
+    import html as _html
     g = job.get("grade", {})
-    rating = g.get("rating", 0)
-    label = g.get("label", "PROFESSIONAL")
-    reason = g.get("reason", "")
-    star_full = "\u2605"
-    star_empty = "\u2606"
-    stars = star_full * rating + star_empty * (5 - rating)
+    score = int(g.get("match_score", 0) or 0)
+    narrative = _html.escape((g.get("narrative") or "").strip())
+    role_summary = _html.escape((g.get("role_summary") or "").strip())
+    reasons = [_html.escape(r.strip()) for r in (g.get("match_reasons") or []) if r and r.strip()]
+    cautions = [_html.escape(c.strip()) for c in (g.get("caution_flags") or []) if c and c.strip()]
     url = job.get("url", "#")
-    title = job.get("title", "")
-    company = job.get("company", "")
-    location = job.get("location", "")
-    source = job.get("source", "")
-    color = "#1a8c4e" if label == "STRATEGIC" else "#1565c0"
-    h = '<div style="border:1px solid #e0e0e0;border-radius:8px;padding:18px 22px;margin-bottom:18px;">\n'
-    h += '<div style="font-size:18px;font-weight:700;color:#111;">' + title + '</div>\n'
-    h += '<div style="font-size:14px;color:#555;margin:4px 0;">'
-    h += company + " &bull; " + location + " &bull; " + source + '</div>\n'
-    h += '<div style="font-size:20px;color:#f4a800;letter-spacing:2px;margin:8px 0;">'
-    h += stars + ' <span style="font-size:13px;color:' + color
-    h += ';font-weight:700;margin-left:8px;">[' + label + ']</span></div>\n'
-    h += '<div style="font-size:13px;color:#444;font-style:italic;margin-bottom:12px;">'
-    h += reason + '</div>\n'
-    h += '<a href="' + url + '" style="background:#1565c0;color:#fff;padding:9px 20px;'
-    h += 'border-radius:5px;text-decoration:none;font-size:14px;">Apply Now &rarr;</a>\n'
+    title = _html.escape(job.get("title", ""))
+    company = _html.escape(job.get("company", ""))
+    location = _html.escape(job.get("location", ""))
+    source = _html.escape(job.get("source", ""))
+    color = _score_color(score)
+
+    h = (
+        '<div style="border:1px solid #e0e0e0;border-radius:8px;'
+        'padding:20px 22px;margin-bottom:18px;background:#fff;">\n'
+    )
+    # Narrative — the emotional hook, first thing the eye lands on
+    if narrative:
+        h += (
+            '<div style="font-size:15px;color:#222;font-style:italic;'
+            'line-height:1.55;margin-bottom:14px;">' + narrative + '</div>\n'
+        )
+    # Score badge + title header row
+    h += '<div style="margin-bottom:6px;">\n'
+    h += (
+        f'<span style="display:inline-block;background:{color};color:#fff;'
+        'font-weight:700;font-size:14px;padding:4px 12px;border-radius:14px;'
+        f'margin-right:10px;">{score}/100</span>\n'
+    )
+    h += (
+        '<span style="font-size:17px;font-weight:700;color:#111;">'
+        + title + '</span>\n'
+    )
+    h += '</div>\n'
+    h += (
+        '<div style="font-size:13px;color:#666;margin-bottom:12px;">'
+        + company + ' &bull; ' + location + ' &bull; ' + source + '</div>\n'
+    )
+    # Role summary
+    if role_summary:
+        h += (
+            '<div style="font-size:13px;color:#444;margin-bottom:10px;">'
+            '<b>What this role is:</b> ' + role_summary + '</div>\n'
+        )
+    # Match reasons as bullets
+    if reasons:
+        h += (
+            '<div style="font-size:13px;color:#333;margin-bottom:4px;">'
+            '<b>Why this fits you:</b></div>\n'
+        )
+        h += '<ul style="margin:0 0 12px 18px;padding:0;font-size:13px;color:#333;">\n'
+        for r in reasons:
+            h += f'<li style="margin-bottom:4px;">{r}</li>\n'
+        h += '</ul>\n'
+    # Caution flags in a soft yellow box
+    if cautions:
+        h += (
+            '<div style="background:#fff8e1;border-left:3px solid #f4a800;'
+            'padding:8px 12px;margin-bottom:12px;font-size:12px;color:#5a4a00;">'
+            '<b>Watch for:</b> ' + ' &middot; '.join(cautions) + '</div>\n'
+        )
+    # Apply button
+    h += (
+        f'<a href="{url}" style="display:inline-block;background:#1565c0;'
+        'color:#fff;padding:9px 20px;border-radius:5px;text-decoration:none;'
+        'font-size:14px;font-weight:bold;">Apply Now &rarr;</a>\n'
+    )
     h += '</div>\n'
     return h
 
@@ -105,7 +159,7 @@ def _build_scan_email(user_data, approved_jobs):
     html += '<hr style="border:none;border-top:1px solid #eee;margin:20px 0;">\n'
     html += '<p style="font-size:15px;color:#333;">Hi ' + name + ',</p>\n'
     html += '<p style="font-size:14px;color:#555;">Here are the top matches from your '
-    html += 'instant scan. Only roles scoring 3+ stars made the cut.</p>\n'
+    html += 'instant scan. Only roles scoring 50+ out of 100 made the cut.</p>\n'
     html += cards
     html += '<div style="text-align:center;margin:24px 0;">'
     html += '<a href="' + APP_URL + '" style="display:inline-block;background:#1a73e8;'
@@ -482,59 +536,79 @@ if st.session_state.get("profile_saved"):
                     st.subheader("Top Matches (" + str(len(approved)) + ")")
                     for job in approved:
                         g = job.get("grade", {})
-                        label = g.get("label", "N/A")
-                        rating = g.get("rating", 0)
-                        reason = g.get("reason", "")
-                        trap = g.get("commission_trap", False)
-                        emoji = "\u2B50" if label == "STRATEGIC" else "\u2705"
+                        score = int(g.get("match_score", 0) or 0)
+                        narrative = (g.get("narrative") or "").strip()
+                        role_summary = (g.get("role_summary") or "").strip()
+                        reasons = [r for r in (g.get("match_reasons") or []) if r and r.strip()]
+                        cautions = [c for c in (g.get("caution_flags") or []) if c and c.strip()]
                         title_text = job.get("title", "Untitled")
                         company_text = job.get("company", "Unknown")
+
                         with st.expander(
-                            emoji + " " + title_text + " at " + company_text
-                            + " \u2014 " + str(rating) + "/5 " + label
+                            f"{score}/100  \u2014  {title_text} at {company_text}"
                         ):
-                            col_a, col_b = st.columns([3, 1])
-                            with col_a:
-                                st.markdown("**Company:** " + company_text)
-                                st.markdown("**Location:** " + job.get("location", "N/A"))
-                                st.markdown("**Source:** " + job.get("source", "Unknown"))
-                            with col_b:
+                            # 1. Narrative first — the "handpicked for you" hook
+                            if narrative:
+                                st.markdown(
+                                    f"> *{narrative}*"
+                                )
+                            # 2. Meta row: location, source, apply link
+                            meta_col, link_col = st.columns([3, 1])
+                            with meta_col:
+                                st.caption(
+                                    f"{company_text} &middot; "
+                                    f"{job.get('location', 'N/A')} &middot; "
+                                    f"{job.get('source', 'Unknown')}"
+                                )
+                            with link_col:
                                 if job.get("url"):
-                                    st.markdown("[\u27A1 Apply / View Job]("
-                                                + job.get("url") + ")")
-                            st.divider()
-                            st.markdown("**AI Assessment:** " + reason)
-                            if trap:
-                                st.warning("\u26A0 Commission trap detected - "
-                                           "base pay may be below 50% of total comp.")
-                            desc_snippet = clean_description(
-                                job.get("description", ""))
-                            if (desc_snippet
-                                    and desc_snippet != "No description available."):
-                                st.caption("**Preview:** " + desc_snippet)
+                                    st.markdown(
+                                        f"[\u27A1 Apply / View]({job.get('url')})"
+                                    )
+                            # 3. Role summary
+                            if role_summary:
+                                st.markdown(f"**What this role is:** {role_summary}")
+                            # 4. Match reasons
+                            if reasons:
+                                st.markdown("**Why this fits you:**")
+                                for r in reasons:
+                                    st.markdown(f"- {r}")
+                            # 5. Caution flags (if any)
+                            if cautions:
+                                st.warning(
+                                    "**Watch for:** " + " &middot; ".join(cautions)
+                                )
+                            # 6. Optional description preview
+                            desc_snippet = clean_description(job.get("description", ""))
+                            if desc_snippet and desc_snippet != "No description available.":
+                                st.caption("**Job listing preview:** " + desc_snippet)
                             if job.get("url"):
                                 st.markdown(
-                                    "[Open full listing on "
-                                    + job.get("source", "source")
-                                    + " \u2197](" + job.get("url") + ")")
+                                    f"[Open full listing on {job.get('source', 'source')} "
+                                    f"\u2197]({job.get('url')})"
+                                )
                 else:
-                    st.info("No jobs scored 3+ stars. Try broadening your "
-                            "titles or adjusting dealbreakers.")
+                    st.info("No jobs scored 50 or higher. Try broadening your "
+                            "titles, loosening dealbreakers, or scanning again later.")
 
                 if graveyard:
-                    with st.expander("Skipped / Low-Rated Jobs ("
-                                     + str(len(graveyard)) + ")"):
+                    with st.expander(
+                        "Skipped / Low-Score Jobs (" + str(len(graveyard)) + ")"
+                    ):
                         for job in graveyard:
                             g = job.get("grade", {})
-                            rating = g.get("rating", 0)
-                            reason = g.get("reason", "No reason")
+                            score = int(g.get("match_score", 0) or 0)
+                            summary = (g.get("role_summary") or "").strip()
+                            # Fall back to first caution if no role_summary
+                            if not summary:
+                                cauts = [c for c in (g.get("caution_flags") or []) if c]
+                                summary = cauts[0] if cauts else "No summary"
                             link = ""
                             if job.get("url"):
-                                link = (" \u2014 [View]("
-                                        + job.get("url") + ")")
+                                link = f" \u2014 [View]({job.get('url')})"
                             st.markdown(
-                                "- **" + job.get("title", "")
-                                + "** at " + job.get("company", "")
-                                + " (" + job.get("source", "")
-                                + ") \u2014 " + str(rating)
-                                + "/5 \u2014 " + reason + link)
+                                f"- **{job.get('title', '')}** at "
+                                f"{job.get('company', '')} "
+                                f"({job.get('source', '')}) \u2014 "
+                                f"{score}/100 \u2014 {summary}{link}"
+                            )

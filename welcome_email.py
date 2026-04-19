@@ -70,7 +70,7 @@ def send_welcome_email(user_data):
     We search <b>5 job boards</b> (Adzuna, The Muse, RemoteOK, JSearch, Google Jobs)
     for positions matching your preferences. Each listing is then <b>graded by AI</b>
     (Google Gemini) against your resume and criteria on a 1-5 star scale. Only the best
-    matches (3+ stars) make it to your daily email or instant scan results.</p>
+    matches (scoring 50+ out of 100) make it to your daily email or instant scan results.</p>
 </td></tr>
 
 <tr><td style="padding:10px 30px;">
@@ -90,20 +90,26 @@ def send_welcome_email(user_data):
 
 <tr><td style="padding:10px 30px;">
   <h3 style="color:#1a73e8;margin:0 0 8px;">What Your Daily Email Looks Like</h3>
-  <p style="color:#555;margin:0 0 10px;">Here is an example of how your matched jobs will appear:</p>
-  <table width="100%" cellpadding="10" cellspacing="0" style="border:1px solid #e0e0e0;border-radius:6px;">
-    <tr style="background:#e8f5e9;">
-      <td style="color:#333;"><b>Python Developer</b> at TechCorp<br/>
-        <span style="color:#777;">Remote | Adzuna | 4/5 stars</span><br/>
-        <span style="color:#1a73e8;">Great match: Python focus, remote, meets salary range.</span></td></tr>
-    <tr style="background:#fff3e0;">
-      <td style="color:#333;"><b>Junior Software Engineer</b> at StartupXYZ<br/>
-        <span style="color:#777;">New York, NY | JSearch | 3/5 stars</span><br/>
-        <span style="color:#1a73e8;">Decent match: entry-level, some Python required.</span></td></tr>
-    <tr style="background:#e8f5e9;">
-      <td style="color:#333;"><b>Backend Engineer</b> at DataFlow Inc<br/>
-        <span style="color:#777;">Remote | Google Jobs | 5/5 stars</span><br/>
-        <span style="color:#1a73e8;">Strategic match: Python + REST APIs, fully remote, above salary target.</span></td></tr>
+  <p style="color:#555;margin:0 0 10px;">Each matched job is scored 0&ndash;100 and includes a personalized "why this fits you" narrative. Here is an example:</p>
+  <table width="100%" cellpadding="12" cellspacing="0" style="border:1px solid #e0e0e0;border-radius:6px;">
+    <tr><td style="color:#333;">
+      <div style="font-style:italic;color:#222;line-height:1.5;margin-bottom:10px;">
+        This role lines up tightly with your 7 years building Python data pipelines at
+        DataCorp &mdash; the team is small, fully remote, and they explicitly want someone
+        who has owned production infra end-to-end, which is exactly your track record.
+      </div>
+      <div>
+        <span style="display:inline-block;background:#1a8c4e;color:#fff;font-weight:700;font-size:13px;padding:3px 10px;border-radius:12px;margin-right:8px;">87/100</span>
+        <b>Senior Python Developer</b>
+      </div>
+      <div style="font-size:12px;color:#666;margin:3px 0 10px;">DataFlow Inc &bull; Remote &bull; Adzuna</div>
+      <div style="font-size:13px;color:#333;"><b>Why this fits you:</b></div>
+      <ul style="margin:4px 0 0 18px;padding:0;font-size:13px;color:#333;">
+        <li>Requires Python + AWS production ownership &mdash; matches your 7 years at DataCorp</li>
+        <li>Fully remote, US-based team &mdash; aligns with your location preference</li>
+        <li>Base at $145k+ &mdash; above your stated floor</li>
+      </ul>
+    </td></tr>
   </table>
 </td></tr>
 

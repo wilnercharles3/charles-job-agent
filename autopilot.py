@@ -51,45 +51,89 @@ def normalise_profile(raw: dict) -> dict:
 
 
 # -- Email Building ----------------------------------------------------------
-STAR_MAP = {
-    5: "★★★★★",
-    4: "★★★★☆",
-    3: "★★★☆☆",
-    2: "★★☆☆☆",
-    1: "★☆☆☆☆",
-}
 
-LABEL_COLOR = {"STRATEGIC": "#1a8c4e", "PROFESSIONAL": "#1565c0"}
+def _score_color(score: int) -> str:
+    """Color band for the match-score badge. Mirrors app.py._score_color."""
+    if score >= 85:
+        return "#1a8c4e"   # green
+    if score >= 65:
+        return "#1565c0"   # blue
+    return "#8a6d3b"       # amber
 
 
 def build_job_card(job: dict) -> str:
-    g = job.get("grade", {})
-    rating = g.get("rating", 0)
-    label = g.get("label", "PROFESSIONAL")
-    reason = g.get("reason", "")
-    stars = STAR_MAP.get(rating, "")
-    color = LABEL_COLOR.get(label, "#333")
-    url = job.get("url", "#")
-    title = job.get("title", "")
-    company = job.get("company", "")
-    location = job.get("location", "")
-    source = job.get("source", "")
+    """Rich job card for the daily digest email.
 
-    return (
-        f'<div style="border:1px solid #e0e0e0;border-radius:8px;'
-        f'padding:18px 22px;margin-bottom:18px;font-family:Arial,sans-serif;">\n'
-        f'  <div style="font-size:18px;font-weight:700;color:#111;">{title}</div>\n'
-        f'  <div style="font-size:14px;color:#555;margin:4px 0;">'
-        f'{company} &bull; {location} &bull; {source}</div>\n'
-        f'  <div style="font-size:20px;color:#f4a800;letter-spacing:2px;margin:8px 0;">'
-        f'{stars} <span style="font-size:13px;color:{color};font-weight:700;'
-        f'letter-spacing:1px;margin-left:8px;">[{label}]</span></div>\n'
-        f'  <div style="font-size:13px;color:#444;font-style:italic;'
-        f'margin-bottom:12px;">{reason}</div>\n'
-        f'  <a href="{url}" style="background:#1565c0;color:#fff;padding:9px 20px;'
-        f'border-radius:5px;text-decoration:none;font-size:14px;">Apply Now &rarr;</a>\n'
-        f'</div>\n'
+    Matches the shape returned by grader.py's rich scoring:
+        match_score, match_reasons[], caution_flags[], role_summary, narrative
+    """
+    import html as _html
+    g = job.get("grade", {})
+    score = int(g.get("match_score", 0) or 0)
+    narrative = _html.escape((g.get("narrative") or "").strip())
+    role_summary = _html.escape((g.get("role_summary") or "").strip())
+    reasons = [_html.escape(r.strip()) for r in (g.get("match_reasons") or []) if r and r.strip()]
+    cautions = [_html.escape(c.strip()) for c in (g.get("caution_flags") or []) if c and c.strip()]
+    url = job.get("url", "#")
+    title = _html.escape(job.get("title", ""))
+    company = _html.escape(job.get("company", ""))
+    location = _html.escape(job.get("location", ""))
+    source = _html.escape(job.get("source", ""))
+    color = _score_color(score)
+
+    parts = [
+        '<div style="border:1px solid #e0e0e0;border-radius:8px;'
+        'padding:20px 22px;margin-bottom:18px;font-family:Arial,sans-serif;'
+        'background:#fff;">',
+    ]
+    # Narrative — first thing the eye lands on
+    if narrative:
+        parts.append(
+            '<div style="font-size:15px;color:#222;font-style:italic;'
+            f'line-height:1.55;margin-bottom:14px;">{narrative}</div>'
+        )
+    # Score badge + title row
+    parts.append(
+        '<div style="margin-bottom:6px;">'
+        f'<span style="display:inline-block;background:{color};color:#fff;'
+        'font-weight:700;font-size:14px;padding:4px 12px;border-radius:14px;'
+        f'margin-right:10px;">{score}/100</span>'
+        f'<span style="font-size:17px;font-weight:700;color:#111;">{title}</span>'
+        '</div>'
     )
+    parts.append(
+        f'<div style="font-size:13px;color:#666;margin-bottom:12px;">'
+        f'{company} &bull; {location} &bull; {source}</div>'
+    )
+    if role_summary:
+        parts.append(
+            '<div style="font-size:13px;color:#444;margin-bottom:10px;">'
+            f'<b>What this role is:</b> {role_summary}</div>'
+        )
+    if reasons:
+        parts.append(
+            '<div style="font-size:13px;color:#333;margin-bottom:4px;">'
+            '<b>Why this fits you:</b></div>'
+        )
+        lis = "".join(
+            f'<li style="margin-bottom:4px;">{r}</li>' for r in reasons
+        )
+        parts.append(
+            f'<ul style="margin:0 0 12px 18px;padding:0;font-size:13px;color:#333;">{lis}</ul>'
+        )
+    if cautions:
+        parts.append(
+            '<div style="background:#fff8e1;border-left:3px solid #f4a800;'
+            'padding:8px 12px;margin-bottom:12px;font-size:12px;color:#5a4a00;">'
+            f'<b>Watch for:</b> {" &middot; ".join(cautions)}</div>'
+        )
+    parts.append(
+        f'<a href="{url}" style="display:inline-block;background:#1565c0;'
+        'color:#fff;padding:9px 20px;border-radius:5px;text-decoration:none;'
+        'font-size:14px;font-weight:bold;">Apply Now &rarr;</a>'
+    )
+    parts.append('</div>')
+    return "\n".join(parts) + "\n"
 
 
 def build_email_html(profile: dict, jobs: list) -> str:
@@ -105,7 +149,7 @@ def build_email_html(profile: dict, jobs: list) -> str:
         f'  <hr style="border:none;border-top:1px solid #eee;margin:20px 0;">\n'
         f'  <p style="font-size:15px;color:#333;">Hi {name},</p>\n'
         f'  <p style="font-size:14px;color:#555;">Here are your top-rated job matches. '
-        f'Only roles scoring 3+ stars made the cut.</p>\n'
+        f'Only roles scoring 50+ out of 100 made the cut.</p>\n'
         f'  {cards}\n'
         f'  <div style="text-align:center;margin:24px 0;">'
         f'<a href="{APP_URL}" style="display:inline-block;background:#1a73e8;color:#fff;'
