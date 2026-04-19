@@ -29,6 +29,10 @@ APP_URL = "https://charles-job-agent-9cpadgvzhra8g38wsrjecd.streamlit.app/"
 
 def extract_text_from_pdf(uploaded_file):
     try:
+        try:
+            uploaded_file.seek(0)  # rewind in case an earlier rerun read the stream
+        except Exception:
+            pass
         reader = PyPDF2.PdfReader(uploaded_file)
         text = ""
         for page in reader.pages:
@@ -140,32 +144,200 @@ def _send_scan_email(to_email, approved_jobs, user_data):
 # -- Page Config ------------------------------------------------------------
 st.set_page_config(page_title="Job Match Agent", page_icon="briefcase", layout="centered")
 st.title("Job Match Agent")
-st.caption("Fill out your profile, save it, and then scan for matching jobs instantly.")
+st.caption("Upload or paste your resume to auto-fill your profile. Review, edit, then save.")
 
+
+# -- Session state defaults for the form (ensures keyed widgets don't clash) --
+_FORM_DEFAULTS = {
+    "full_name_input": "",
+    "email_input": "",
+    "target_titles_input": "",
+    "preferred_locations_input": "",
+    "min_salary_input": 0,
+    "job_type_input": "Remote",
+    "looking_for_input": "",
+    "dealbreakers_input": "",
+}
+for _k, _v in _FORM_DEFAULTS.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
+
+# -- Resume Upload + Auto-Parse (outside form so widgets trigger reruns) ----
+st.subheader("Start with your resume (optional)")
+st.caption("Upload or paste your resume and we'll auto-fill the form below.")
+
+col_up, col_paste = st.columns(2)
+with col_up:
+    resume_file = st.file_uploader("Upload PDF or TXT", type=["pdf", "txt"],
+                                   key="_resume_uploader")
+with col_paste:
+    resume_paste = st.text_area("Or paste text",
+                                placeholder="Paste your resume text here...",
+                                height=120, key="_resume_paste_area")
+
+# Compute a stable hash of the current resume input (if any) so we only re-parse on change.
+_current_hash = None
+if resume_file is not None:
+    _current_hash = f"file:{resume_file.name}:{resume_file.size}"
+elif resume_paste and resume_paste.strip():
+    _current_hash = f"paste:{hash(resume_paste.strip())}"
+
+_new_resume = (
+    _current_hash is not None
+    and _current_hash != st.session_state.get("_last_resume_hash")
+)
+
+if _new_resume:
+    # Extract the text fresh. Try PyPDF2 first, fall back to pdfplumber for
+    # PDFs with unusual font encoding or layouts.
+    _resume_text = ""
+    _extract_errors = []
+    _extract_method = ""
+    if resume_file is not None:
+        if resume_file.type == "application/pdf":
+            _resume_text = extract_text_from_pdf(resume_file) or ""
+            if _resume_text:
+                _extract_method = "PyPDF2"
+            else:
+                _extract_errors.append("PyPDF2 returned empty")
+                # Fallback: pdfplumber
+                try:
+                    import pdfplumber
+                    resume_file.seek(0)
+                    with pdfplumber.open(resume_file) as _pdf:
+                        _pages = [p.extract_text() or "" for p in _pdf.pages]
+                        _resume_text = "\n".join(_pages).strip()
+                    if _resume_text:
+                        _extract_method = "pdfplumber (fallback)"
+                    else:
+                        _extract_errors.append("pdfplumber returned empty")
+                except ImportError:
+                    _extract_errors.append(
+                        "pdfplumber not installed — can't fall back. "
+                        "Run: pip install pdfplumber"
+                    )
+                except Exception as _pe:
+                    _extract_errors.append(f"pdfplumber failed: {type(_pe).__name__}: {_pe}")
+        else:
+            try:
+                _resume_text = str(resume_file.getvalue(), "utf-8")
+                _extract_method = "text file"
+            except Exception as _e:
+                _extract_errors.append("Text read failed: " + str(_e))
+    else:
+        _resume_text = resume_paste.strip()
+        _extract_method = "pasted"
+
+    # Surface extraction failures so the user knows their PDF is unreadable
+    # (neither PyPDF2 nor pdfplumber could pull text — usually a scanned image).
+    if not _resume_text and resume_file is not None:
+        st.error(
+            "Couldn't extract any text from this PDF. It may be a scanned "
+            "image (no text layer — needs OCR) or use a non-standard font. "
+            "Try re-exporting from Word/Google Docs, or paste the text manually."
+        )
+        for _err in _extract_errors:
+            st.caption(_err)
+
+    if _resume_text:
+        with st.spinner("Analyzing your resume with AI..."):
+            parsed = grader.parse_resume_to_profile(_resume_text)
+            summary = grader.summarize_resume(_resume_text)
+
+        st.session_state["resume_text_stash"] = _resume_text
+        st.session_state["resume_summary_stash"] = summary or "Summary generation returned empty."
+
+        # Pre-fill form fields. Rules:
+        #   - If field is at default (empty / 0) -> fill
+        #   - If field matches the last value THIS parser set -> overwrite
+        #     (user hasn't edited it since our last parse)
+        #   - Otherwise (user typed or edited something) -> preserve
+        # Shadow keys "_parsed_{key}" remember what parser last set so we can
+        # tell user-edits apart from stale pre-fills on subsequent uploads.
+        # Email is intentionally skipped — user types that manually.
+        _FIELD_MAP = {
+            "full_name_input":          ("full_name",          ""),
+            "target_titles_input":      ("target_titles",      ""),
+            "preferred_locations_input":("preferred_locations",""),
+            "min_salary_input":         ("min_salary",         0),
+            "looking_for_input":        ("looking_for",        ""),
+        }
+        _filled = []
+        if parsed:
+            for _key, (_src, _default) in _FIELD_MAP.items():
+                _new_val = parsed.get(_src)
+                if not _new_val:
+                    continue
+                _cur = st.session_state.get(_key)
+                _shadow_key = f"_parsed_{_key}"
+                _last_parsed = st.session_state.get(_shadow_key)
+
+                _is_default = (
+                    _cur is None
+                    or _cur == _default
+                    or (isinstance(_cur, str) and not _cur.strip())
+                )
+                _is_stale_prefill = (
+                    _last_parsed is not None and _cur == _last_parsed
+                )
+                if _is_default or _is_stale_prefill:
+                    st.session_state[_key] = _new_val
+                    st.session_state[_shadow_key] = _new_val
+                    _filled.append(_src)
+
+        if _filled:
+            _names = {
+                "full_name": "name",
+                "target_titles": "target titles",
+                "preferred_locations": "location",
+                "min_salary": "salary",
+                "looking_for": "what you're looking for",
+            }
+            _human = ", ".join(_names.get(f, f) for f in _filled)
+            st.success(
+                f"Pre-filled from your resume: {_human}. Review and edit below before saving."
+            )
+        elif parsed:
+            st.info("Resume analyzed — no new fields pre-filled "
+                    "(you've already typed values for everything it could suggest).")
+        else:
+            st.info("Couldn't auto-parse the resume (AI parser may be rate-limited). "
+                    "Please fill in the form below manually.")
+
+    st.session_state["_last_resume_hash"] = _current_hash
+
+st.divider()
+
+
+# -- Profile Form (keyed widgets auto-pre-fill from session_state) ----------
 with st.form("profile_form"):
     st.subheader("Your Info")
     col1, col2 = st.columns(2)
     with col1:
-        name = st.text_input("Full name")
+        name = st.text_input("Full name", key="full_name_input")
     with col2:
-        email = st.text_input("Email address")
-
-    st.markdown("**Resume** - Upload a file OR paste your resume text below:")
-    resume_file = st.file_uploader("Upload your resume (PDF or TXT)", type=["pdf", "txt"])
-    resume_paste = st.text_area("Or paste your resume here",
-                                placeholder="Paste your resume text here...", height=150)
+        email = st.text_input("Email address", key="email_input",
+                              help="Type this yourself — we don't auto-fill email from the resume.")
 
     st.subheader("What You're Looking For")
     titles = st.text_input("Job title(s) you're targeting",
-                           placeholder="e.g. Python Developer, Software Engineer")
+                           placeholder="e.g. Python Developer, Software Engineer",
+                           key="target_titles_input")
     location = st.text_input("Preferred location(s)",
-                             placeholder="e.g. Remote, New York")
-    salary = st.number_input("Minimum base salary (annual)", min_value=0, value=0, step=5000)
-    job_type = st.selectbox("Job type", ["Remote", "On-site", "Hybrid"])
+                             placeholder="e.g. Remote, New York",
+                             key="preferred_locations_input")
+    salary = st.number_input("Minimum base salary (annual)",
+                             min_value=0, step=5000,
+                             key="min_salary_input")
+    job_type = st.selectbox("Job type", ["Remote", "On-site", "Hybrid"],
+                            key="job_type_input")
     looking_for = st.text_area("Tell us what you're looking for",
-                               placeholder="Describe your ideal role...")
+                               placeholder="Describe your ideal role...",
+                               key="looking_for_input")
     dealbreakers = st.text_area("Dealbreakers (optional)",
-                                placeholder="e.g. No commission-only, no night shifts")
+                                placeholder="e.g. No commission-only, no night shifts",
+                                key="dealbreakers_input")
     submitted = st.form_submit_button("Save My Profile", type="primary",
                                       use_container_width=True)
 
@@ -177,28 +349,12 @@ if submitted:
             # Check if this is a brand-new user BEFORE saving
             first_time = is_new_user(email)
 
-            resume_text = ""
-            resume_summary = "No resume provided"
-
-            # Try uploaded file first, then pasted text
-            if resume_file:
-                if resume_file.type == "application/pdf":
-                    resume_text = extract_text_from_pdf(resume_file)
-                else:
-                    resume_text = str(resume_file.read(), "utf-8")
-            elif resume_paste and resume_paste.strip():
-                resume_text = resume_paste.strip()
-
-            if resume_text:
-                with st.spinner("Summarizing your resume with AI..."):
-                    try:
-                        resume_summary = grader.summarize_resume(resume_text)
-                        if not resume_summary:
-                            resume_summary = "Summary generation returned empty."
-                    except Exception as ai_err:
-                        resume_summary = "Summary generation failed."
-                        st.warning("AI summary failed, profile still saved. Error: "
-                                   + str(ai_err))
+            # Resume text and summary were captured above when the user uploaded
+            # or pasted. No re-processing on save.
+            resume_text = st.session_state.get("resume_text_stash", "")
+            resume_summary = st.session_state.get(
+                "resume_summary_stash", "No resume provided"
+            )
 
             user_data = {
                 "full_name": name,

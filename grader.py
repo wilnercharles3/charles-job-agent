@@ -75,6 +75,101 @@ def _call_gemini(prompt: str, max_wait: float = MAX_429_WAIT) -> str:
     raise RuntimeError("unreachable")
 
 
+# -- Resume Parsing (runs on upload to pre-fill form fields) -----------------
+
+def _sanitize_salary(val) -> int:
+    """Coerce an LLM-returned salary into an integer. Handles '$130,000', '130k', etc."""
+    if isinstance(val, bool):
+        return 0
+    if isinstance(val, int):
+        return max(0, val)
+    if isinstance(val, float):
+        return max(0, int(val))
+    if isinstance(val, str):
+        s = val.strip().lower()
+        s = s.replace("$", "").replace(",", "").replace("usd", "").replace(" ", "")
+        if s.endswith("/year") or s.endswith("/yr"):
+            s = s.rsplit("/", 1)[0]
+        if s.endswith("k"):
+            try:
+                return max(0, int(float(s[:-1]) * 1000))
+            except ValueError:
+                return 0
+        try:
+            return max(0, int(float(s)))
+        except ValueError:
+            return 0
+    return 0
+
+
+def parse_resume_to_profile(resume_text: str) -> dict:
+    """Extract form-pre-fill fields from a resume. Returns {} if parse fails.
+
+    Return keys (all optional; caller decides which to apply):
+        full_name, email, target_titles, preferred_locations,
+        min_salary (int), looking_for
+    """
+    if not gemini or not resume_text or len(resume_text.strip()) < 50:
+        return {}
+
+    prompt = (
+        "You are a resume analyst pre-filling a job-search form. The resume "
+        "below is from a professional job seeker. Make concrete, realistic "
+        "estimates — do NOT hedge with generic titles or salary 0 when the "
+        "resume gives you enough signal to be specific.\n\n"
+        "Return ONLY valid JSON, no markdown fences, with these exact keys:\n"
+        "{\n"
+        '  "full_name": "candidate full name, or empty string",\n'
+        '  "email": "email address if present in the resume, or empty string",\n'
+        '  "target_titles": "2-4 comma-separated job titles this candidate '
+        'would REALISTICALLY TARGET next. Rules: (1) include seniority prefix '
+        '(Junior / Mid / Senior / Staff / Principal / Director / VP) based on '
+        "their years and scope of experience; (2) reference specific tech "
+        "stacks, tools, or specializations from the resume — not bare labels. "
+        'GOOD: \'Senior Python Developer, Backend Engineer, Platform Engineer\'. '
+        'BAD: \'Software Engineer, Developer\'.",\n'
+        '  "preferred_locations": "comma-separated locations mentioned in the '
+        'resume, or \'Remote\' if the candidate seems open to remote work",\n'
+        '  "min_salary": "integer USD estimate of a realistic minimum annual '
+        'base salary. Use these rough anchors: junior 60000-80000, mid-level '
+        '80000-120000, senior 120000-170000, staff/principal 170000-250000, '
+        'director+ 200000+. Adjust up for tech/finance/FAANG signals, down for '
+        'non-profit/government/early-career. The number should almost always '
+        'land between 60000 and 250000. Only return 0 if the resume is empty, '
+        'garbled, or contains zero professional signal. Return as a bare '
+        'integer, not a string or formatted number.",\n'
+        '  "looking_for": "2-3 sentence summary, written in third person, of '
+        'the kind of role this candidate would realistically seek based on '
+        'their background and trajectory"\n'
+        "}\n\n"
+        "Do not invent specific companies, titles, or salary figures unsupported "
+        "by the resume. But do infer reasonably — a resume showing 8 years of "
+        "Python and AWS experience clearly justifies 'Senior Python Developer' "
+        "and a six-figure salary, even if those exact words aren't written.\n\n"
+        f"RESUME:\n{resume_text[:4000]}"
+    )
+
+    try:
+        text = _call_gemini(prompt)
+        data = json.loads(_clean_json_response(text))
+    except QuotaExhausted:
+        return {}
+    except Exception as e:
+        print(f"[grader] parse_resume_to_profile failed: {str(e)[:140]}")
+        return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    # Sanitize — never let a bad LLM string crash the form's number input
+    out = {}
+    for k in ("full_name", "email", "target_titles", "preferred_locations", "looking_for"):
+        v = data.get(k)
+        out[k] = v.strip() if isinstance(v, str) else ""
+    out["min_salary"] = _sanitize_salary(data.get("min_salary", 0))
+    return out
+
+
 # -- Resume Summarization (runs once on upload, stored in Supabase) ----------
 
 def summarize_resume(resume_text: str) -> str:
