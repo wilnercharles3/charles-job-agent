@@ -51,6 +51,7 @@ def normalise_profile(raw: dict) -> dict:
         "looking_for": raw.get("looking_for", ""),
         "dealbreakers": raw.get("dealbreakers", ""),
         "resume_summary": raw.get("resume_summary", ""),
+        "resumes": raw.get("resumes") or [],
     }
 
 
@@ -92,6 +93,7 @@ def build_job_card(job: dict) -> str:
     g = job.get("grade", {})
     score = int(g.get("match_score", 0) or 0)
     action = g.get("recommended_action") or "Maybe"
+    rec_resume = (g.get("recommended_resume") or "").strip()
     narrative = _html.escape((g.get("narrative") or "").strip())
     role_summary = _html.escape((g.get("role_summary") or "").strip())
     reasons = [_html.escape(r.strip()) for r in (g.get("match_reasons") or []) if r and r.strip()]
@@ -114,13 +116,21 @@ def build_job_card(job: dict) -> str:
             '<div style="font-size:15px;color:#222;font-style:italic;'
             f'line-height:1.55;margin-bottom:14px;">{narrative}</div>'
         )
-    # Action + score badge + title row
+    # Action + score badge + title row (+ optional Use: <label> pill)
+    use_pill = ""
+    if rec_resume:
+        use_pill = (
+            '<span style="display:inline-block;background:#5a6c8a;color:#fff;'
+            'font-size:11px;padding:3px 10px;border-radius:11px;margin-right:8px;'
+            f'text-transform:uppercase;letter-spacing:0.5px;">Use: {_html.escape(rec_resume)}</span>'
+        )
     parts.append(
         '<div style="margin-bottom:6px;">'
         + _action_badge_html(action) +
         f'<span style="display:inline-block;background:{color};color:#fff;'
         'font-weight:700;font-size:14px;padding:4px 12px;border-radius:14px;'
         f'margin-right:10px;">{score}/100</span>'
+        + use_pill +
         f'<span style="font-size:17px;font-weight:700;color:#111;">{title}</span>'
         '</div>'
     )

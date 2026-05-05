@@ -91,6 +91,7 @@ def _build_job_card_html(job):
     g = job.get("grade", {})
     score = int(g.get("match_score", 0) or 0)
     action = g.get("recommended_action") or "Maybe"
+    rec_resume = (g.get("recommended_resume") or "").strip()
     narrative = _html.escape((g.get("narrative") or "").strip())
     role_summary = _html.escape((g.get("role_summary") or "").strip())
     reasons = [_html.escape(r.strip()) for r in (g.get("match_reasons") or []) if r and r.strip()]
@@ -120,6 +121,12 @@ def _build_job_card_html(job):
         'font-weight:700;font-size:14px;padding:4px 12px;border-radius:14px;'
         f'margin-right:10px;">{score}/100</span>\n'
     )
+    if rec_resume:
+        h += (
+            '<span style="display:inline-block;background:#5a6c8a;color:#fff;'
+            'font-size:11px;padding:3px 10px;border-radius:11px;margin-right:8px;'
+            f'text-transform:uppercase;letter-spacing:0.5px;">Use: {_html.escape(rec_resume)}</span>\n'
+        )
     h += (
         '<span style="font-size:17px;font-weight:700;color:#111;">'
         + title + '</span>\n'
@@ -241,149 +248,229 @@ for _k, _v in _FORM_DEFAULTS.items():
         st.session_state[_k] = _v
 
 
-# -- Resume Upload + Auto-Parse (outside form so widgets trigger reruns) ----
-st.subheader("Start with your resume (optional)")
-st.caption("Upload or paste your resume and we'll auto-fill the form below.")
+# -- Multi-Resume Manager (outside form so widgets trigger reruns) ----------
+# Up to 3 named resumes per profile. Slot 0 is "Primary" and drives the form
+# pre-fill via parse_resume_to_profile. Additional slots only get summarized
+# and labeled — the grader uses them as alternative versions to recommend per job.
 
-col_up, col_paste = st.columns(2)
-with col_up:
-    resume_file = st.file_uploader("Upload PDF or TXT", type=["pdf", "txt"],
-                                   key="_resume_uploader")
-with col_paste:
-    resume_paste = st.text_area("Or paste text",
-                                placeholder="Paste your resume text here...",
-                                height=120, key="_resume_paste_area")
+if "resumes" not in st.session_state:
+    st.session_state["resumes"] = [{"label": "Primary", "text": "", "summary": ""}]
 
-# Compute a stable hash of the current resume input (if any) so we only re-parse on change.
-_current_hash = None
-if resume_file is not None:
-    _current_hash = f"file:{resume_file.name}:{resume_file.size}"
-elif resume_paste and resume_paste.strip():
-    _current_hash = f"paste:{hash(resume_paste.strip())}"
 
-_new_resume = (
-    _current_hash is not None
-    and _current_hash != st.session_state.get("_last_resume_hash")
+def _add_resume_slot():
+    if len(st.session_state["resumes"]) < 3:
+        st.session_state["resumes"].append({"label": "", "text": "", "summary": ""})
+
+
+def _remove_resume_slot(i):
+    """Pop slot i and clear orphaned per-slot widget keys at and after that index
+    so subsequent re-renders don't show stale state from the removed slot."""
+    if 0 < i < len(st.session_state["resumes"]):
+        st.session_state["resumes"].pop(i)
+        for _k in list(st.session_state.keys()):
+            for _prefix in ("resume_label_", "_resume_uploader_", "_resume_paste_", "_last_resume_hash_"):
+                if _k.startswith(_prefix):
+                    try:
+                        if int(_k[len(_prefix):]) >= i:
+                            del st.session_state[_k]
+                    except ValueError:
+                        pass
+
+
+def _extract_text_from_upload(uploaded_file):
+    """Extract text from a Streamlit uploaded_file. Tries PyPDF2 first, falls
+    back to pdfplumber for PDFs PyPDF2 can't read. Returns (text, errors_list)."""
+    text = ""
+    errors = []
+    if uploaded_file.type == "application/pdf":
+        text = extract_text_from_pdf(uploaded_file) or ""
+        if not text:
+            errors.append("PyPDF2 returned empty")
+            try:
+                import pdfplumber
+                uploaded_file.seek(0)
+                with pdfplumber.open(uploaded_file) as _pdf:
+                    text = "\n".join((p.extract_text() or "") for p in _pdf.pages).strip()
+                if not text:
+                    errors.append("pdfplumber returned empty")
+            except Exception as _e:
+                errors.append(f"pdfplumber failed: {type(_e).__name__}: {_e}")
+    else:
+        try:
+            text = str(uploaded_file.getvalue(), "utf-8")
+        except Exception as _e:
+            errors.append("Text read failed: " + str(_e))
+    return text, errors
+
+
+st.subheader("Your resume(s)")
+st.caption(
+    "Upload up to 3 versions (e.g. one tailored for sales roles, another for "
+    "technical roles). Each match in your daily email and instant scans will "
+    "tell you which version to send. The first slot drives the form pre-fill below."
 )
 
-if _new_resume:
-    # Extract the text fresh. Try PyPDF2 first, fall back to pdfplumber for
-    # PDFs with unusual font encoding or layouts.
-    _resume_text = ""
-    _extract_errors = []
-    _extract_method = ""
-    if resume_file is not None:
-        if resume_file.type == "application/pdf":
-            _resume_text = extract_text_from_pdf(resume_file) or ""
-            if _resume_text:
-                _extract_method = "PyPDF2"
-            else:
-                _extract_errors.append("PyPDF2 returned empty")
-                # Fallback: pdfplumber
-                try:
-                    import pdfplumber
-                    resume_file.seek(0)
-                    with pdfplumber.open(resume_file) as _pdf:
-                        _pages = [p.extract_text() or "" for p in _pdf.pages]
-                        _resume_text = "\n".join(_pages).strip()
-                    if _resume_text:
-                        _extract_method = "pdfplumber (fallback)"
-                    else:
-                        _extract_errors.append("pdfplumber returned empty")
-                except ImportError:
-                    _extract_errors.append(
-                        "pdfplumber not installed — can't fall back. "
-                        "Run: pip install pdfplumber"
-                    )
-                except Exception as _pe:
-                    _extract_errors.append(f"pdfplumber failed: {type(_pe).__name__}: {_pe}")
-        else:
-            try:
-                _resume_text = str(resume_file.getvalue(), "utf-8")
-                _extract_method = "text file"
-            except Exception as _e:
-                _extract_errors.append("Text read failed: " + str(_e))
-    else:
-        _resume_text = resume_paste.strip()
-        _extract_method = "pasted"
+for _i in range(len(st.session_state["resumes"])):
+    _slot = st.session_state["resumes"][_i]
+    _is_primary = (_i == 0)
 
-    # Surface extraction failures so the user knows their PDF is unreadable
-    # (neither PyPDF2 nor pdfplumber could pull text — usually a scanned image).
-    if not _resume_text and resume_file is not None:
-        st.error(
-            "Couldn't extract any text from this PDF. It may be a scanned "
-            "image (no text layer — needs OCR) or use a non-standard font. "
-            "Try re-exporting from Word/Google Docs, or paste the text manually."
+    with st.container(border=True):
+        _hdr_l, _hdr_r = st.columns([5, 1])
+        with _hdr_l:
+            _hdr_text = f"**Resume {_i + 1}**"
+            if _is_primary:
+                _hdr_text += "  ·  *Primary — used to pre-fill the form below*"
+            st.markdown(_hdr_text)
+        with _hdr_r:
+            if not _is_primary:
+                st.button("Remove", key=f"remove_resume_{_i}",
+                          on_click=_remove_resume_slot, args=(_i,))
+
+        # Initialize the label widget from the slot dict on first render of this slot
+        if f"resume_label_{_i}" not in st.session_state:
+            st.session_state[f"resume_label_{_i}"] = _slot.get("label", "")
+        st.text_input(
+            "Label",
+            key=f"resume_label_{_i}",
+            placeholder="e.g. Enterprise AE, Backend Engineer (auto-suggested on upload)",
         )
-        for _err in _extract_errors:
-            st.caption(_err)
 
-    if _resume_text:
-        with st.spinner("Analyzing your resume with AI..."):
-            parsed = grader.parse_resume_to_profile(_resume_text)
-            summary = grader.summarize_resume(_resume_text)
-
-        st.session_state["resume_text_stash"] = _resume_text
-        st.session_state["resume_summary_stash"] = summary or "Summary generation returned empty."
-
-        # Pre-fill form fields. Rules:
-        #   - If field is at default (empty / 0) -> fill
-        #   - If field matches the last value THIS parser set -> overwrite
-        #     (user hasn't edited it since our last parse)
-        #   - Otherwise (user typed or edited something) -> preserve
-        # Shadow keys "_parsed_{key}" remember what parser last set so we can
-        # tell user-edits apart from stale pre-fills on subsequent uploads.
-        # Email is intentionally skipped — user types that manually.
-        _FIELD_MAP = {
-            "full_name_input":          ("full_name",          ""),
-            "target_titles_input":      ("target_titles",      ""),
-            "preferred_locations_input":("preferred_locations",""),
-            "min_salary_input":         ("min_salary",         0),
-            "looking_for_input":        ("looking_for",        ""),
-        }
-        _filled = []
-        if parsed:
-            for _key, (_src, _default) in _FIELD_MAP.items():
-                _new_val = parsed.get(_src)
-                if not _new_val:
-                    continue
-                _cur = st.session_state.get(_key)
-                _shadow_key = f"_parsed_{_key}"
-                _last_parsed = st.session_state.get(_shadow_key)
-
-                _is_default = (
-                    _cur is None
-                    or _cur == _default
-                    or (isinstance(_cur, str) and not _cur.strip())
-                )
-                _is_stale_prefill = (
-                    _last_parsed is not None and _cur == _last_parsed
-                )
-                if _is_default or _is_stale_prefill:
-                    st.session_state[_key] = _new_val
-                    st.session_state[_shadow_key] = _new_val
-                    _filled.append(_src)
-
-        if _filled:
-            _names = {
-                "full_name": "name",
-                "target_titles": "target titles",
-                "preferred_locations": "location",
-                "min_salary": "salary",
-                "looking_for": "what you're looking for",
-            }
-            _human = ", ".join(_names.get(f, f) for f in _filled)
-            st.success(
-                f"Pre-filled from your resume: {_human}. Review and edit below before saving."
+        _col_up, _col_paste = st.columns(2)
+        with _col_up:
+            _slot_file = st.file_uploader(
+                "Upload PDF or TXT",
+                type=["pdf", "txt"],
+                key=f"_resume_uploader_{_i}",
             )
-        elif parsed:
-            st.info("Resume analyzed — no new fields pre-filled "
-                    "(you've already typed values for everything it could suggest).")
-        else:
-            st.info("Couldn't auto-parse the resume (AI parser may be rate-limited). "
-                    "Please fill in the form below manually.")
+        with _col_paste:
+            _slot_paste = st.text_area(
+                "Or paste text",
+                placeholder="Paste resume text here...",
+                height=100,
+                key=f"_resume_paste_{_i}",
+            )
 
-    st.session_state["_last_resume_hash"] = _current_hash
+        # Per-slot stable hash so we only re-parse when content actually changes.
+        _slot_hash = None
+        if _slot_file is not None:
+            _slot_hash = f"file:{_slot_file.name}:{_slot_file.size}"
+        elif _slot_paste and _slot_paste.strip():
+            _slot_hash = f"paste:{hash(_slot_paste.strip())}"
+
+        _last_hash_key = f"_last_resume_hash_{_i}"
+        _new_in_slot = (
+            _slot_hash is not None
+            and _slot_hash != st.session_state.get(_last_hash_key)
+        )
+
+        if _new_in_slot:
+            if _slot_file is not None:
+                _text, _errors = _extract_text_from_upload(_slot_file)
+            else:
+                _text, _errors = _slot_paste.strip(), []
+
+            if not _text:
+                st.error(
+                    "Couldn't extract any text. Try re-exporting from Word/Google Docs, "
+                    "or paste the text manually."
+                )
+                for _e in _errors:
+                    st.caption(_e)
+            else:
+                with st.spinner("Analyzing this resume with AI..."):
+                    _summary = grader.summarize_resume(_text)
+                    # Only suggest a label if the user hasn't already typed one for this slot
+                    _existing_label = (st.session_state.get(f"resume_label_{_i}") or "").strip()
+                    _suggested_label = "" if _existing_label else grader.suggest_resume_label(_text)
+                    # Slot 0 (Primary) also drives form-field pre-fill
+                    _parsed = grader.parse_resume_to_profile(_text) if _is_primary else {}
+
+                # Update slot dict
+                _slot["text"] = _text
+                _slot["summary"] = _summary or ""
+                if _suggested_label:
+                    _slot["label"] = _suggested_label
+                    st.session_state[f"resume_label_{_i}"] = _suggested_label
+
+                # Slot 0: pre-fill form fields with the existing shadow-key logic
+                if _is_primary:
+                    if _parsed:
+                        _FIELD_MAP = {
+                            "full_name_input":          ("full_name",          ""),
+                            "target_titles_input":      ("target_titles",      ""),
+                            "preferred_locations_input":("preferred_locations",""),
+                            "min_salary_input":         ("min_salary",         0),
+                            "looking_for_input":        ("looking_for",        ""),
+                        }
+                        _filled = []
+                        for _key, (_src, _default) in _FIELD_MAP.items():
+                            _val = _parsed.get(_src)
+                            if not _val:
+                                continue
+                            _cur = st.session_state.get(_key)
+                            _shadow_key = f"_parsed_{_key}"
+                            _last_parsed = st.session_state.get(_shadow_key)
+                            _is_default = (
+                                _cur is None
+                                or _cur == _default
+                                or (isinstance(_cur, str) and not _cur.strip())
+                            )
+                            _is_stale_prefill = (
+                                _last_parsed is not None and _cur == _last_parsed
+                            )
+                            if _is_default or _is_stale_prefill:
+                                st.session_state[_key] = _val
+                                st.session_state[_shadow_key] = _val
+                                _filled.append(_src)
+                        if _filled:
+                            _names = {
+                                "full_name": "name",
+                                "target_titles": "target titles",
+                                "preferred_locations": "location",
+                                "min_salary": "salary",
+                                "looking_for": "what you're looking for",
+                            }
+                            st.success(
+                                "Pre-filled from your primary resume: "
+                                + ", ".join(_names.get(f, f) for f in _filled)
+                                + ". Review and edit below before saving."
+                            )
+                        else:
+                            st.info(
+                                "Primary resume analyzed — no new fields pre-filled "
+                                "(you've already typed values for everything it could suggest)."
+                            )
+                    else:
+                        st.info(
+                            "Couldn't auto-parse the primary resume "
+                            "(AI parser may be rate-limited). Fill in the form manually below."
+                        )
+                else:
+                    if _summary:
+                        st.success(f"Resume {_i + 1} summarized and ready.")
+                    else:
+                        st.info(
+                            "Resume saved, but AI summary couldn't be generated "
+                            "(rate-limited or quota exhausted). The grader will still "
+                            "use the raw text."
+                        )
+
+            st.session_state[_last_hash_key] = _slot_hash
+
+        # Sync the label widget value back into the slot dict every render
+        # so user-typed labels are captured before save.
+        _slot["label"] = (st.session_state.get(f"resume_label_{_i}") or "").strip() or _slot.get("label", "")
+
+# Add another button (capped at 3 slots)
+if len(st.session_state["resumes"]) < 3:
+    st.button("+ Add another resume", on_click=_add_resume_slot)
+
+# Mirror the primary slot's text + summary to the legacy stash keys that the
+# save handler reads. Keeps backwards compat with the rest of the app while
+# Commit 2 wires the full resumes array into the grader.
+_primary = st.session_state["resumes"][0] if st.session_state["resumes"] else {}
+st.session_state["resume_text_stash"] = _primary.get("text", "")
+st.session_state["resume_summary_stash"] = _primary.get("summary") or "No resume provided"
 
 st.divider()
 
@@ -476,6 +563,7 @@ if submitted:
                 "dealbreakers": dealbreakers,
                 "resume_summary": resume_summary,
                 "resume_text": resume_text,
+                "resumes": st.session_state.get("resumes") or [],
             }
             if not db.save_profile(user_data):
                 st.error(
@@ -619,6 +707,7 @@ if st.session_state.get("profile_saved"):
                         g = job.get("grade", {})
                         score = int(g.get("match_score", 0) or 0)
                         action = g.get("recommended_action") or "Maybe"
+                        rec_resume = (g.get("recommended_resume") or "").strip()
                         narrative = (g.get("narrative") or "").strip()
                         role_summary = (g.get("role_summary") or "").strip()
                         reasons = [r for r in (g.get("match_reasons") or []) if r and r.strip()]
@@ -636,6 +725,9 @@ if st.session_state.get("profile_saved"):
                                 st.markdown(
                                     f"> *{narrative}*"
                                 )
+                            # Recommended resume (only if user has multiple)
+                            if rec_resume:
+                                st.markdown(f"📎 **Recommended resume to send:** `{rec_resume}`")
                             # 2. Meta row: location, source, apply link
                             meta_col, link_col = st.columns([3, 1])
                             with meta_col:

@@ -41,6 +41,31 @@ def is_new_user(email: str) -> bool:
         return True
 
 
+def _backfill_resumes(profile: dict) -> dict:
+    """If a returning user has the legacy single resume_text/resume_summary
+    but no resumes array yet, synthesize a single 'Primary' entry so the new
+    multi-resume code paths can treat every profile uniformly.
+
+    Mutates and returns the same dict.
+    """
+    if not isinstance(profile, dict):
+        return profile
+    resumes = profile.get("resumes")
+    if isinstance(resumes, list) and resumes:
+        # Already populated — nothing to do
+        return profile
+    legacy_text = (profile.get("resume_text") or "").strip()
+    if legacy_text:
+        profile["resumes"] = [{
+            "label":   "Primary",
+            "text":    legacy_text,
+            "summary": (profile.get("resume_summary") or "").strip(),
+        }]
+    else:
+        profile["resumes"] = []
+    return profile
+
+
 def load_profile(email: str) -> dict:
     """Load a user profile by email. Returns dict or empty dict."""
     if not supabase or not email:
@@ -53,7 +78,7 @@ def load_profile(email: str) -> dict:
             .execute()
         )
         if result.data:
-            return result.data[0]
+            return _backfill_resumes(result.data[0])
     except Exception as e:
         print(f"[db] Failed to load profile for {email}: {e}")
     return {}
@@ -86,7 +111,8 @@ def load_all_profiles() -> list:
         return []
     try:
         result = supabase.table("profiles").select("*").execute()
-        return result.data or []
+        rows = result.data or []
+        return [_backfill_resumes(p) for p in rows]
     except Exception as e:
         print(f"[db] Failed to load profiles: {e}")
         return []

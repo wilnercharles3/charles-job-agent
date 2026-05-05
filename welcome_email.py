@@ -90,7 +90,7 @@ def send_welcome_email(user_data):
 
 <tr><td style="padding:10px 30px;">
   <h3 style="color:#1a73e8;margin:0 0 8px;">What Your Daily Email Looks Like</h3>
-  <p style="color:#555;margin:0 0 10px;">Each matched job is scored 0&ndash;100 and includes a personalized "why this fits you" narrative. Here is an example:</p>
+  <p style="color:#555;margin:0 0 10px;">Each matched job is scored 0&ndash;100 and includes a personalized "why this fits you" narrative. If you upload more than one resume, every match also tells you which version to send. Here is an example:</p>
   <table width="100%" cellpadding="12" cellspacing="0" style="border:1px solid #e0e0e0;border-radius:6px;">
     <tr><td style="color:#333;">
       <div style="font-style:italic;color:#222;line-height:1.5;margin-bottom:10px;">
@@ -101,6 +101,7 @@ def send_welcome_email(user_data):
       <div>
         <span style="display:inline-block;background:#1a8c4e;color:#fff;font-weight:700;font-size:12px;padding:3px 10px;border-radius:11px;margin-right:8px;text-transform:uppercase;letter-spacing:0.5px;">APPLY</span>
         <span style="display:inline-block;background:#1a8c4e;color:#fff;font-weight:700;font-size:13px;padding:3px 10px;border-radius:12px;margin-right:8px;">87/100</span>
+        <span style="display:inline-block;background:#5a6c8a;color:#fff;font-size:11px;padding:3px 10px;border-radius:11px;margin-right:8px;text-transform:uppercase;letter-spacing:0.5px;">USE: Backend Engineer</span>
         <b>Senior Python Developer</b>
       </div>
       <div style="font-size:12px;color:#666;margin:3px 0 10px;">DataFlow Inc &bull; Remote &bull; Adzuna</div>

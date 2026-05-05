@@ -102,6 +102,45 @@ def _sanitize_salary(val) -> int:
     return 0
 
 
+def suggest_resume_label(resume_text: str) -> str:
+    """Propose a 2-4 word label that captures the role focus of a resume.
+
+    Examples: 'Enterprise AE', 'SaaS Sales Specialist', 'Backend Engineer',
+    'Hospitality Strategic Account', 'Technical PM'.
+
+    Used by the multi-resume form to pre-populate the Label input on upload.
+    Returns "" on quota exhaustion or any error so the UI just leaves the
+    label blank for the user to type themselves.
+    """
+    if not gemini or not resume_text or len(resume_text.strip()) < 50:
+        return ""
+    prompt = (
+        "In 2-4 words, propose a label that describes the role focus or "
+        "specialization of this resume. Examples of good labels:\n"
+        "- 'Enterprise AE'\n"
+        "- 'SaaS Sales Specialist'\n"
+        "- 'Backend Engineer'\n"
+        "- 'Hospitality Strategic Account'\n"
+        "- 'Technical Program Manager'\n"
+        "- 'IT Systems Administrator'\n\n"
+        "Return ONLY the label. No quotes, no markdown, no explanation, "
+        "no punctuation at the end. Just 2-4 words.\n\n"
+        f"RESUME:\n{resume_text[:3000]}"
+    )
+    try:
+        text = _call_gemini(prompt)
+    except QuotaExhausted:
+        return ""
+    except Exception as e:
+        print(f"[grader] suggest_resume_label failed: {str(e)[:140]}")
+        return ""
+    # Strip any quotes/markdown the LLM included anyway, cap at 40 chars
+    label = (text or "").strip().strip('"').strip("'").strip("`").strip()
+    if len(label) > 40:
+        label = label[:40].rsplit(" ", 1)[0]
+    return label
+
+
 def parse_resume_to_profile(resume_text: str) -> dict:
     """Extract form-pre-fill fields from a resume. Returns {} if parse fails.
 
@@ -225,6 +264,7 @@ def _build_grade_prompt(job: dict, profile: dict) -> str:
     resume_summary = profile.get("resume_summary", "")
     ote_line = f"\n- Target total compensation (OTE): ${target_ote:,}" if target_ote else ""
     companies_line = f"\n- Companies of high interest: {target_companies}" if target_companies else ""
+    resumes_section, resume_schema_line = _resumes_block(profile, resume_summary)
 
     return f"""You are an expert job-matching advisor writing a personalized \
 assessment for {first_name}. Grade this job against the candidate profile and \
@@ -246,8 +286,8 @@ actually involves day-to-day (not just the job title)",
 ('This role aligns with your 8 years at Acme managing enterprise \
 accounts...'). MUST reference specific tools, companies, or roles from their \
 resume to feel hand-picked. Highlight the most exciting aspect for someone \
-with their background."
-}}
+with their background.",
+{resume_schema_line}}}
 
 SCORING GUIDE:
 - 90-100: rare exceptional fit; strong match on role, domain, tools, seniority, and compensation signals
@@ -269,7 +309,7 @@ CANDIDATE PROFILE:
 - Minimum base salary: ${salary:,}{ote_line}
 - What they want: {looking_for}
 - Dealbreakers: {dealbreakers}
-- Resume summary: {resume_summary}
+{resumes_section}
 
 JOB LISTING:
 - Title: {job.get('title', '')}
@@ -294,6 +334,7 @@ RATE_LIMITED_GRADE = {
     "role_summary": "",
     "narrative": "",
     "recommended_action": "Skip",
+    "recommended_resume": "",
 }
 FAILED_GRADE = {
     "match_score": 0,
@@ -302,6 +343,7 @@ FAILED_GRADE = {
     "role_summary": "",
     "narrative": "",
     "recommended_action": "Skip",
+    "recommended_resume": "",
 }
 UNCONFIGURED_GRADE = {
     "match_score": 0,
@@ -310,7 +352,48 @@ UNCONFIGURED_GRADE = {
     "role_summary": "",
     "narrative": "",
     "recommended_action": "Skip",
+    "recommended_resume": "",
 }
+
+
+def _resumes_block(profile: dict, fallback_summary: str) -> tuple:
+    """Build the resume context to inject into the grading prompt.
+
+    Returns (resumes_section_text, schema_instruction_text):
+      - For users with > 1 resume: enumerates each {label, summary} so the LLM
+        can pick the best-fit version per job; the schema instruction requires
+        recommended_resume to be set.
+      - For single-resume users: same single 'Resume summary: ...' line we've
+        always sent; schema instruction tells the LLM to leave recommended_resume
+        as an empty string. No extra tokens vs pre-multi-resume era.
+    """
+    resumes = profile.get("resumes") or []
+    if not isinstance(resumes, list):
+        resumes = []
+    # Filter out blank entries so labels with no text don't pollute the prompt
+    resumes = [
+        r for r in resumes
+        if isinstance(r, dict) and (r.get("text") or r.get("summary"))
+    ]
+    if len(resumes) > 1:
+        lines = ["RESUMES AVAILABLE (pick the best-fit version for this job):"]
+        for r in resumes:
+            label = (r.get("label") or "Untitled").strip() or "Untitled"
+            summary = (r.get("summary") or "").strip() or "(no summary available)"
+            lines.append(f'  - "{label}": {summary}')
+        section = "\n".join(lines)
+        schema = (
+            '  "recommended_resume": "the LABEL (verbatim) of the best-fit '
+            'resume from the list above. Required when multiple resumes are listed.",\n'
+        )
+        return section, schema
+    # Single-resume / no-resume case: keep legacy single-line format
+    section = f"Resume summary: {fallback_summary}"
+    schema = (
+        '  "recommended_resume": "leave as empty string \\"\\" — the candidate '
+        'has only one resume, so no recommendation is needed.",\n'
+    )
+    return section, schema
 
 
 def _derive_recommended_action(grade: dict, threshold: int) -> str:
@@ -372,6 +455,7 @@ def _build_batch_prompt(jobs_batch: list, profile: dict) -> str:
     resume_summary = profile.get("resume_summary", "")
     ote_line = f"\n- Target total compensation (OTE): ${target_ote:,}" if target_ote else ""
     companies_line = f"\n- Companies of high interest: {target_companies}" if target_companies else ""
+    resumes_section, resume_schema_line = _resumes_block(profile, resume_summary)
 
     jobs_text = ""
     for i, job in enumerate(jobs_batch):
@@ -398,8 +482,8 @@ industry) — NOT generic phrasing"],
   "role_summary": "one sentence describing what the role actually involves",
   "narrative": "2-3 sentences written TO the candidate in second person \
 ('This role aligns with your...'). MUST reference specific resume details \
-(tools, companies, roles) to feel hand-picked."
-}}
+(tools, companies, roles) to feel hand-picked.",
+{resume_schema_line}}}
 
 SCORING GUIDE:
 - 90-100: rare exceptional fit
@@ -421,7 +505,7 @@ CANDIDATE PROFILE:
 - Minimum base salary: ${salary:,}{ote_line}
 - What they want: {looking_for}
 - Dealbreakers: {dealbreakers}
-- Resume summary: {resume_summary}
+{resumes_section}
 {jobs_text}"""
 
 

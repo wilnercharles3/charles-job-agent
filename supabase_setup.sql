@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     full_name text,
     resume_text text,
     resume_summary text,
+    resumes jsonb DEFAULT '[]'::jsonb,
     target_titles text,
     preferred_locations text,
     preferred_industries text,
@@ -56,3 +57,6 @@ ALTER TABLE profiles ADD COLUMN IF NOT EXISTS preferred_industries text;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS target_ote integer;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS match_threshold integer DEFAULT 50;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS target_companies text;
+
+-- migration: add resumes jsonb array for multi-resume support (up to 3 named resumes per profile)
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS resumes jsonb DEFAULT '[]'::jsonb;
