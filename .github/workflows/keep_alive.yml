@@ -16,7 +16,10 @@ jobs:
     steps:
       - name: Ping Streamlit app
         run: |
-          curl --silent --show-error --location \
+          # Don't follow redirects: any HTTP response (including 3xx login
+          # redirects) proves the server is awake. Following them caused
+          # curl to hit the redirect cap and fail the workflow.
+          curl --silent --show-error \
                --max-time 30 \
                --retry 2 --retry-delay 5 \
                --output /dev/null \
