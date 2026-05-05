@@ -42,6 +42,7 @@ def normalise_profile(raw: dict) -> dict:
         "email": raw.get("email", ""),
         "target_titles": raw.get("target_titles", ""),
         "preferred_locations": raw.get("preferred_locations") or raw.get("location_pref", ""),
+        "preferred_industries": raw.get("preferred_industries", ""),
         "min_salary": raw.get("min_salary", 0),
         "job_type": raw.get("job_type", "Remote"),
         "looking_for": raw.get("looking_for", ""),

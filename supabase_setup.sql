@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     resume_summary text,
     target_titles text,
     preferred_locations text,
+    preferred_industries text,
     min_salary integer,
     job_type text,
     looking_for text,
@@ -44,3 +45,6 @@ CREATE TABLE IF NOT EXISTS sent_jobs (
 -- index for fast lookups by email + job
 CREATE INDEX IF NOT EXISTS idx_sent_jobs_lookup
     ON sent_jobs (user_email, job_title, company);
+
+-- migration: add preferred_industries to existing deployments
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS preferred_industries text;

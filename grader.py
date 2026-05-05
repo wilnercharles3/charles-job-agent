@@ -216,6 +216,7 @@ def _build_grade_prompt(job: dict, profile: dict) -> str:
     first_name = name.split()[0] if name and name.strip() else "the candidate"
     titles = profile.get("target_titles", "")
     locations = profile.get("preferred_locations", "")
+    industries = profile.get("preferred_industries", "")
     salary = profile.get("min_salary", 0)
     looking_for = profile.get("looking_for", "")
     dealbreakers = profile.get("dealbreakers", "")
@@ -260,6 +261,7 @@ CANDIDATE PROFILE:
 - Name: {name}
 - Targeting roles: {titles}
 - Preferred locations: {locations}
+- Preferred industries: {industries}
 - Minimum base salary: ${salary:,}
 - What they want: {looking_for}
 - Dealbreakers: {dealbreakers}
@@ -338,6 +340,7 @@ def _build_batch_prompt(jobs_batch: list, profile: dict) -> str:
     first_name = name.split()[0] if name and name.strip() else "the candidate"
     titles = profile.get("target_titles", "")
     locations = profile.get("preferred_locations", "")
+    industries = profile.get("preferred_industries", "")
     salary = profile.get("min_salary", 0)
     looking_for = profile.get("looking_for", "")
     dealbreakers = profile.get("dealbreakers", "")
@@ -387,6 +390,7 @@ CANDIDATE PROFILE:
 - Name: {name}
 - Targeting roles: {titles}
 - Preferred locations: {locations}
+- Preferred industries: {industries}
 - Minimum base salary: ${salary:,}
 - What they want: {looking_for}
 - Dealbreakers: {dealbreakers}

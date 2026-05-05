@@ -207,6 +207,7 @@ _FORM_DEFAULTS = {
     "email_input": "",
     "target_titles_input": "",
     "preferred_locations_input": "",
+    "preferred_industries_input": "",
     "min_salary_input": 0,
     "job_type_input": "Remote",
     "looking_for_input": "",
@@ -381,6 +382,9 @@ with st.form("profile_form"):
     location = st.text_input("Preferred location(s)",
                              placeholder="e.g. Remote, New York",
                              key="preferred_locations_input")
+    industries = st.text_input("Preferred industries (optional)",
+                               placeholder="e.g. SaaS, Hospitality Tech, Payments",
+                               key="preferred_industries_input")
     salary = st.number_input("Minimum base salary (annual)",
                              min_value=0, step=5000,
                              key="min_salary_input")
@@ -415,6 +419,7 @@ if submitted:
                 "email": email,
                 "target_titles": titles,
                 "preferred_locations": location,
+                "preferred_industries": industries,
                 "min_salary": salary,
                 "job_type": job_type,
                 "looking_for": looking_for,
@@ -478,7 +483,7 @@ if st.session_state.get("profile_saved"):
 
             if raw_jobs:
                 st.write("Fetched " + str(len(raw_jobs)) + " raw jobs. Filtering...")
-                jobs = pre_filter(raw_jobs, title_list)[:25]
+                jobs = pre_filter(raw_jobs, title_list)
                 # Remove jobs already sent in the last 14 days
                 jobs = filter_unsent_jobs(user_email, jobs)
             else:
@@ -493,6 +498,7 @@ if st.session_state.get("profile_saved"):
                     "full_name": ud.get("full_name", ""),
                     "target_titles": ud.get("target_titles", ""),
                     "preferred_locations": ud.get("preferred_locations", ""),
+                    "preferred_industries": ud.get("preferred_industries", ""),
                     "min_salary": ud.get("min_salary", 0),
                     "looking_for": ud.get("looking_for", ""),
                     "dealbreakers": ud.get("dealbreakers", ""),
