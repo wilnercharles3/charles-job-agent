@@ -265,6 +265,104 @@ SPAM_TITLE_WORDS = {
 }
 
 
+# Universal hard-no patterns. These are signals of bad-faith roles regardless of
+# what kind of job the user is searching for. Sales-specific exclusions (SDR/BDR/
+# retail/etc.) live in each user's dealbreakers field — see _extract_dealbreaker_keywords.
+UNIVERSAL_BAD_KEYWORDS = [
+    "commission only", "commission-only",
+    "100% commission", "no base salary", "no base pay",
+    "mlm", "multi-level marketing", "multilevel marketing", "pyramid scheme",
+    "door to door", "door-to-door",
+    "must purchase", "buy your own", "pay to start", "pay to apply",
+]
+
+
+def _extract_dealbreaker_keywords(dealbreakers_text: str) -> list:
+    """Pull keyword phrases from a user's free-text dealbreakers.
+
+    Looks for patterns like 'no SDR', 'avoid retail', 'no commission-only roles'.
+    Conservative: only extracts 1-4 word phrases that look like specific role/term
+    exclusions. Returns lowercased phrases.
+    """
+    if not dealbreakers_text:
+        return []
+    import re
+    text = dealbreakers_text.lower()
+    out = []
+    # "no <thing>" / "avoid <thing>" with optional " roles" / " jobs" suffix.
+    patterns = [
+        r'\bno\s+([a-z][\w\-\s]{2,40}?)(?:\s+(?:role|roles|job|jobs|position|positions))?(?:[\.,;]|$)',
+        r'\bavoid\s+([a-z][\w\-\s]{2,40}?)(?:\s+(?:role|roles|job|jobs|position|positions))?(?:[\.,;]|$)',
+    ]
+    for pat in patterns:
+        for m in re.finditer(pat, text):
+            kw = m.group(1).strip()
+            # Filter pure stopwords / generic
+            if kw and len(kw) >= 3 and kw not in {"the", "any", "all"}:
+                out.append(kw)
+    # Dedupe, preserve order
+    seen, deduped = set(), []
+    for k in out:
+        if k not in seen:
+            seen.add(k)
+            deduped.append(k)
+    return deduped
+
+
+def reject_bad_fit(job, dealbreakers_text: str = "") -> bool:
+    """Return True if a job matches a universal scam pattern OR a phrase the
+    user explicitly listed in their dealbreakers. Pre-filter to save LLM tokens."""
+    text = " ".join([
+        job.get("title", "") or "",
+        job.get("description", "") or "",
+        job.get("company", "") or "",
+    ]).lower()
+    bad_kws = list(UNIVERSAL_BAD_KEYWORDS) + _extract_dealbreaker_keywords(dealbreakers_text)
+    return any(kw in text for kw in bad_kws if kw)
+
+
+def rule_based_score(job: dict, profile: dict) -> int:
+    """Cheap rule-based fit score (0-90 typically) used to prioritise jobs
+    BEFORE the LLM grader. Combines user's titles, industries, locations,
+    and target companies. Higher = better candidate for AI grading."""
+    title = (job.get("title", "") or "").lower()
+    desc = (job.get("description", "") or "").lower()
+    company = (job.get("company", "") or "").lower()
+    job_loc = (job.get("location", "") or "").lower()
+    text = f"{title} {desc} {company} {job_loc}"
+
+    def _kws(field):
+        return [k.strip().lower() for k in (profile.get(field) or "").split(",") if k.strip()]
+
+    title_kws = _kws("target_titles")
+    industry_kws = _kws("preferred_industries")
+    location_kws = _kws("preferred_locations")
+    company_kws = _kws("target_companies")
+
+    score = 0
+    # Title match — strongest signal
+    if any(kw in title for kw in title_kws):
+        score += 30
+    elif any(kw in text for kw in title_kws):
+        score += 10  # title keyword in body but not headline
+    # Industry signal
+    if any(kw in text for kw in industry_kws):
+        score += 20
+    # Location signal
+    if any(kw in job_loc for kw in location_kws):
+        score += 12
+    elif "remote" in job_loc and "remote" in (profile.get("preferred_locations", "") or "").lower():
+        score += 12
+    # Target company boost
+    if any(kw in company for kw in company_kws):
+        score += 18
+    # Salary / OTE signals (low-confidence but still useful)
+    salary_floor = profile.get("min_salary", 0) or 0
+    if salary_floor and any(token in text for token in ["base salary", "base pay", "ote"]):
+        score += 8
+    return score
+
+
 def _has_valid_url(job):
     url = job.get("url", "").strip()
     if not url:

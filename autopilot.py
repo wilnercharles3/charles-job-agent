@@ -20,7 +20,7 @@ from email.mime.text import MIMEText
 
 from dotenv import load_dotenv
 from db import load_all_profiles, filter_unsent_jobs, mark_jobs_sent
-from jobs import fetch_all_jobs, pre_filter
+from jobs import fetch_all_jobs, pre_filter, reject_bad_fit, rule_based_score
 from grader import grade_all_jobs
 
 load_dotenv()
@@ -43,7 +43,10 @@ def normalise_profile(raw: dict) -> dict:
         "target_titles": raw.get("target_titles", ""),
         "preferred_locations": raw.get("preferred_locations") or raw.get("location_pref", ""),
         "preferred_industries": raw.get("preferred_industries", ""),
+        "target_companies": raw.get("target_companies", ""),
         "min_salary": raw.get("min_salary", 0),
+        "target_ote": raw.get("target_ote", 0),
+        "match_threshold": raw.get("match_threshold", 50),
         "job_type": raw.get("job_type", "Remote"),
         "looking_for": raw.get("looking_for", ""),
         "dealbreakers": raw.get("dealbreakers", ""),
@@ -62,6 +65,23 @@ def _score_color(score: int) -> str:
     return "#8a6d3b"       # amber
 
 
+_ACTION_COLORS = {
+    "Apply": "#1a8c4e",
+    "Maybe": "#c47900",
+    "Skip":  "#777777",
+}
+
+
+def _action_badge_html(action: str) -> str:
+    """Inline pill HTML for the recommended_action label."""
+    color = _ACTION_COLORS.get(action, "#555")
+    return (
+        f'<span style="display:inline-block;background:{color};color:#fff;'
+        f'font-weight:700;font-size:12px;padding:3px 10px;border-radius:11px;'
+        f'margin-right:8px;text-transform:uppercase;letter-spacing:0.5px;">{action}</span>'
+    )
+
+
 def build_job_card(job: dict) -> str:
     """Rich job card for the daily digest email.
 
@@ -71,6 +91,7 @@ def build_job_card(job: dict) -> str:
     import html as _html
     g = job.get("grade", {})
     score = int(g.get("match_score", 0) or 0)
+    action = g.get("recommended_action") or "Maybe"
     narrative = _html.escape((g.get("narrative") or "").strip())
     role_summary = _html.escape((g.get("role_summary") or "").strip())
     reasons = [_html.escape(r.strip()) for r in (g.get("match_reasons") or []) if r and r.strip()]
@@ -93,9 +114,10 @@ def build_job_card(job: dict) -> str:
             '<div style="font-size:15px;color:#222;font-style:italic;'
             f'line-height:1.55;margin-bottom:14px;">{narrative}</div>'
         )
-    # Score badge + title row
+    # Action + score badge + title row
     parts.append(
         '<div style="margin-bottom:6px;">'
+        + _action_badge_html(action) +
         f'<span style="display:inline-block;background:{color};color:#fff;'
         'font-weight:700;font-size:14px;padding:4px 12px;border-radius:14px;'
         f'margin-right:10px;">{score}/100</span>'
@@ -210,9 +232,26 @@ def run():
         # Pre-filter obvious mismatches
         jobs = pre_filter(jobs, titles)
 
+        # Hard-exclude scam patterns + the user's own dealbreaker phrases
+        # (saves Gemini tokens before grading). Universal patterns + parsed
+        # "no X" / "avoid X" phrases from their dealbreakers field.
+        before_reject = len(jobs)
+        jobs = [j for j in jobs if not reject_bad_fit(j, profile.get("dealbreakers", ""))]
+        if before_reject > len(jobs):
+            print(f"[autopilot] Hard-rejected {before_reject - len(jobs)} jobs for {name}")
+
         # Remove jobs already sent to this user
         jobs = filter_unsent_jobs(email, jobs)
         print(f"[autopilot] {len(jobs)} new jobs after dedup for {name}")
+
+        # Rule-based pre-score so we send the best 50 to the AI grader.
+        # Cheap CPU work that protects daily Gemini quota when title nets are wide.
+        for _j in jobs:
+            _j["rule_score"] = rule_based_score(_j, profile)
+        jobs.sort(key=lambda j: j.get("rule_score", 0), reverse=True)
+        if len(jobs) > 50:
+            print(f"[autopilot] Truncating to top 50 by rule score (was {len(jobs)})")
+            jobs = jobs[:50]
 
         if not jobs:
             print(f"[autopilot] No new jobs - skipping email for {name}")

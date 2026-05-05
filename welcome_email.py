@@ -99,6 +99,7 @@ def send_welcome_email(user_data):
         who has owned production infra end-to-end, which is exactly your track record.
       </div>
       <div>
+        <span style="display:inline-block;background:#1a8c4e;color:#fff;font-weight:700;font-size:12px;padding:3px 10px;border-radius:11px;margin-right:8px;text-transform:uppercase;letter-spacing:0.5px;">APPLY</span>
         <span style="display:inline-block;background:#1a8c4e;color:#fff;font-weight:700;font-size:13px;padding:3px 10px;border-radius:12px;margin-right:8px;">87/100</span>
         <b>Senior Python Developer</b>
       </div>

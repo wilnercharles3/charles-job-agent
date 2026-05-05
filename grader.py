@@ -217,10 +217,14 @@ def _build_grade_prompt(job: dict, profile: dict) -> str:
     titles = profile.get("target_titles", "")
     locations = profile.get("preferred_locations", "")
     industries = profile.get("preferred_industries", "")
+    target_companies = profile.get("target_companies", "")
     salary = profile.get("min_salary", 0)
+    target_ote = profile.get("target_ote", 0) or 0
     looking_for = profile.get("looking_for", "")
     dealbreakers = profile.get("dealbreakers", "")
     resume_summary = profile.get("resume_summary", "")
+    ote_line = f"\n- Target total compensation (OTE): ${target_ote:,}" if target_ote else ""
+    companies_line = f"\n- Companies of high interest: {target_companies}" if target_companies else ""
 
     return f"""You are an expert job-matching advisor writing a personalized \
 assessment for {first_name}. Grade this job against the candidate profile and \
@@ -261,8 +265,8 @@ CANDIDATE PROFILE:
 - Name: {name}
 - Targeting roles: {titles}
 - Preferred locations: {locations}
-- Preferred industries: {industries}
-- Minimum base salary: ${salary:,}
+- Preferred industries: {industries}{companies_line}
+- Minimum base salary: ${salary:,}{ote_line}
 - What they want: {looking_for}
 - Dealbreakers: {dealbreakers}
 - Resume summary: {resume_summary}
@@ -289,6 +293,7 @@ RATE_LIMITED_GRADE = {
     "caution_flags": ["AI grader is temporarily rate-limited. Try again in a few minutes."],
     "role_summary": "",
     "narrative": "",
+    "recommended_action": "Skip",
 }
 FAILED_GRADE = {
     "match_score": 0,
@@ -296,6 +301,7 @@ FAILED_GRADE = {
     "caution_flags": ["AI grader couldn't assess this role (parse error)."],
     "role_summary": "",
     "narrative": "",
+    "recommended_action": "Skip",
 }
 UNCONFIGURED_GRADE = {
     "match_score": 0,
@@ -303,7 +309,24 @@ UNCONFIGURED_GRADE = {
     "caution_flags": ["AI grader not configured (missing GEMINI_API_KEY)."],
     "role_summary": "",
     "narrative": "",
+    "recommended_action": "Skip",
 }
+
+
+def _derive_recommended_action(grade: dict, threshold: int) -> str:
+    """Convert a numeric grade into an actionable label.
+
+    - Apply: score >= 80 AND no more than one caution. Strong fit; no major reservations.
+    - Skip:  score < threshold. Below the user's selectivity floor.
+    - Maybe: everything in between. Worth a look but not a slam dunk.
+    """
+    score = int(grade.get("match_score", 0) or 0)
+    cautions = grade.get("caution_flags", []) or []
+    if score < threshold:
+        return "Skip"
+    if score >= 80 and len(cautions) <= 1:
+        return "Apply"
+    return "Maybe"
 
 
 def _clean_json_response(text: str) -> str:
@@ -341,10 +364,14 @@ def _build_batch_prompt(jobs_batch: list, profile: dict) -> str:
     titles = profile.get("target_titles", "")
     locations = profile.get("preferred_locations", "")
     industries = profile.get("preferred_industries", "")
+    target_companies = profile.get("target_companies", "")
     salary = profile.get("min_salary", 0)
+    target_ote = profile.get("target_ote", 0) or 0
     looking_for = profile.get("looking_for", "")
     dealbreakers = profile.get("dealbreakers", "")
     resume_summary = profile.get("resume_summary", "")
+    ote_line = f"\n- Target total compensation (OTE): ${target_ote:,}" if target_ote else ""
+    companies_line = f"\n- Companies of high interest: {target_companies}" if target_companies else ""
 
     jobs_text = ""
     for i, job in enumerate(jobs_batch):
@@ -390,8 +417,8 @@ CANDIDATE PROFILE:
 - Name: {name}
 - Targeting roles: {titles}
 - Preferred locations: {locations}
-- Preferred industries: {industries}
-- Minimum base salary: ${salary:,}
+- Preferred industries: {industries}{companies_line}
+- Minimum base salary: ${salary:,}{ote_line}
 - What they want: {looking_for}
 - Dealbreakers: {dealbreakers}
 - Resume summary: {resume_summary}
@@ -436,6 +463,12 @@ def grade_all_jobs(jobs: list, profile: dict, on_progress=None) -> tuple:
     global _quota_dead
     _quota_dead = False  # reset per invocation — quota may have replenished
 
+    # Per-profile threshold (set by user via match-selectivity slider).
+    # Falls back to the module default if missing or invalid.
+    threshold = profile.get("match_threshold")
+    if not isinstance(threshold, int) or threshold < 0 or threshold > 100:
+        threshold = APPROVAL_THRESHOLD
+
     approved = []
     graveyard = []
     total = len(jobs)
@@ -445,11 +478,13 @@ def grade_all_jobs(jobs: list, profile: dict, on_progress=None) -> tuple:
         grades = grade_batch(batch, profile)
 
         for job, grade in zip(batch, grades):
+            # Derive Apply/Maybe/Skip from the numeric score + cautions
+            grade["recommended_action"] = _derive_recommended_action(grade, threshold)
             job["grade"] = grade
             score = grade.get("match_score", 0)
 
             # caution_flags are informational only — they don't gate approval
-            if score < APPROVAL_THRESHOLD:
+            if score < threshold:
                 graveyard.append(job)
             else:
                 approved.append(job)
@@ -460,7 +495,9 @@ def grade_all_jobs(jobs: list, profile: dict, on_progress=None) -> tuple:
         # If quota died mid-loop, mark remaining jobs as rate-limited and stop.
         if _quota_dead and i + BATCH_SIZE < total:
             for remaining in jobs[i + BATCH_SIZE:]:
-                remaining["grade"] = dict(RATE_LIMITED_GRADE)
+                _stub = dict(RATE_LIMITED_GRADE)
+                _stub["recommended_action"] = "Skip"
+                remaining["grade"] = _stub
                 graveyard.append(remaining)
             break
 

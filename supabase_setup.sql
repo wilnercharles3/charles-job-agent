@@ -8,7 +8,10 @@ CREATE TABLE IF NOT EXISTS profiles (
     target_titles text,
     preferred_locations text,
     preferred_industries text,
+    target_companies text,
     min_salary integer,
+    target_ote integer,
+    match_threshold integer DEFAULT 50,
     job_type text,
     looking_for text,
     dealbreakers text,
@@ -48,3 +51,8 @@ CREATE INDEX IF NOT EXISTS idx_sent_jobs_lookup
 
 -- migration: add preferred_industries to existing deployments
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS preferred_industries text;
+
+-- migration: add target_ote, match_threshold, target_companies for richer matching
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS target_ote integer;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS match_threshold integer DEFAULT 50;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS target_companies text;

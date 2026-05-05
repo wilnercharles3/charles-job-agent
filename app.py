@@ -19,7 +19,7 @@ import PyPDF2
 
 import db
 import grader
-from jobs import fetch_all_jobs, pre_filter
+from jobs import fetch_all_jobs, pre_filter, reject_bad_fit, rule_based_score
 from grader import grade_all_jobs
 from welcome_email import send_welcome_email, send_profile_update_email
 from db import is_new_user, mark_jobs_sent, filter_unsent_jobs
@@ -68,11 +68,29 @@ def _score_color(score: int) -> str:
     return "#8a6d3b"      # olive/amber
 
 
+_ACTION_COLORS = {
+    "Apply": "#1a8c4e",  # green
+    "Maybe": "#c47900",  # amber
+    "Skip":  "#777777",  # gray
+}
+
+
+def _action_badge_html(action: str) -> str:
+    """Inline pill HTML for the recommended_action label (used in email cards)."""
+    color = _ACTION_COLORS.get(action, "#555")
+    return (
+        f'<span style="display:inline-block;background:{color};color:#fff;'
+        f'font-weight:700;font-size:12px;padding:3px 10px;border-radius:11px;'
+        f'margin-right:8px;text-transform:uppercase;letter-spacing:0.5px;">{action}</span>'
+    )
+
+
 def _build_job_card_html(job):
     """Build one HTML card for a graded job (for scan/daily emails)."""
     import html as _html
     g = job.get("grade", {})
     score = int(g.get("match_score", 0) or 0)
+    action = g.get("recommended_action") or "Maybe"
     narrative = _html.escape((g.get("narrative") or "").strip())
     role_summary = _html.escape((g.get("role_summary") or "").strip())
     reasons = [_html.escape(r.strip()) for r in (g.get("match_reasons") or []) if r and r.strip()]
@@ -94,8 +112,9 @@ def _build_job_card_html(job):
             '<div style="font-size:15px;color:#222;font-style:italic;'
             'line-height:1.55;margin-bottom:14px;">' + narrative + '</div>\n'
         )
-    # Score badge + title header row
+    # Action badge + score badge + title header row
     h += '<div style="margin-bottom:6px;">\n'
+    h += _action_badge_html(action)
     h += (
         f'<span style="display:inline-block;background:{color};color:#fff;'
         'font-weight:700;font-size:14px;padding:4px 12px;border-radius:14px;'
@@ -158,8 +177,9 @@ def _build_scan_email(user_data, approved_jobs):
     html += '<p style="color:#666;font-size:14px;">Instant Scan Results - ' + today + '</p>\n'
     html += '<hr style="border:none;border-top:1px solid #eee;margin:20px 0;">\n'
     html += '<p style="font-size:15px;color:#333;">Hi ' + name + ',</p>\n'
+    threshold = int(user_data.get("match_threshold", 50) or 50)
     html += '<p style="font-size:14px;color:#555;">Here are the top matches from your '
-    html += 'instant scan. Only roles scoring 50+ out of 100 made the cut.</p>\n'
+    html += f'instant scan. Only roles scoring {threshold}+ out of 100 made the cut.</p>\n'
     html += cards
     html += '<div style="text-align:center;margin:24px 0;">'
     html += '<a href="' + APP_URL + '" style="display:inline-block;background:#1a73e8;'
@@ -208,7 +228,10 @@ _FORM_DEFAULTS = {
     "target_titles_input": "",
     "preferred_locations_input": "",
     "preferred_industries_input": "",
+    "target_companies_input": "",
     "min_salary_input": 0,
+    "target_ote_input": 0,
+    "match_threshold_input": 50,
     "job_type_input": "Remote",
     "looking_for_input": "",
     "dealbreakers_input": "",
@@ -385,11 +408,35 @@ with st.form("profile_form"):
     industries = st.text_input("Preferred industries (optional)",
                                placeholder="e.g. SaaS, Hospitality Tech, Payments",
                                key="preferred_industries_input")
-    salary = st.number_input("Minimum base salary (annual)",
-                             min_value=0, step=5000,
-                             key="min_salary_input")
+    target_companies = st.text_area(
+        "Companies you'd love to work at (optional, comma-separated)",
+        placeholder="e.g. Stripe, Anthropic, Toast",
+        key="target_companies_input",
+        height=70,
+    )
+    col_sal, col_ote = st.columns(2)
+    with col_sal:
+        salary = st.number_input("Minimum base salary (annual)",
+                                 min_value=0, step=5000,
+                                 key="min_salary_input")
+    with col_ote:
+        target_ote = st.number_input(
+            "Target total comp / OTE (optional)",
+            min_value=0, step=5000,
+            key="target_ote_input",
+            help="Total expected compensation including commission/bonus. Leave 0 if base salary is the only number that matters.",
+        )
     job_type = st.selectbox("Job type", ["Remote", "On-site", "Hybrid"],
                             key="job_type_input")
+    match_threshold = st.slider(
+        "Match selectivity",
+        min_value=30, max_value=95, step=5,
+        key="match_threshold_input",
+        help="Minimum match score (0-100) for a job to make the cut. "
+             "50 = loose (more matches, more noise). "
+             "75 = balanced. "
+             "85 = strict (only the strongest fits).",
+    )
     looking_for = st.text_area("Tell us what you're looking for",
                                placeholder="Describe your ideal role...",
                                key="looking_for_input")
@@ -420,7 +467,10 @@ if submitted:
                 "target_titles": titles,
                 "preferred_locations": location,
                 "preferred_industries": industries,
+                "target_companies": target_companies,
                 "min_salary": salary,
+                "target_ote": target_ote,
+                "match_threshold": match_threshold,
                 "job_type": job_type,
                 "looking_for": looking_for,
                 "dealbreakers": dealbreakers,
@@ -484,8 +534,30 @@ if st.session_state.get("profile_saved"):
             if raw_jobs:
                 st.write("Fetched " + str(len(raw_jobs)) + " raw jobs. Filtering...")
                 jobs = pre_filter(raw_jobs, title_list)
+                # Hard-exclude scam patterns + user's dealbreaker phrases (saves LLM tokens)
+                _dbreakers = ud.get("dealbreakers", "")
+                _before = len(jobs)
+                jobs = [j for j in jobs if not reject_bad_fit(j, _dbreakers)]
+                if _before > len(jobs):
+                    st.caption(
+                        f"Filtered out {_before - len(jobs)} jobs "
+                        "matching your dealbreakers or scam patterns."
+                    )
                 # Remove jobs already sent in the last 14 days
                 jobs = filter_unsent_jobs(user_email, jobs)
+                # Rule-based pre-score so we send the best 50 to the AI grader
+                # (huge LLM-cost win on broad scans). Sort high-to-low; truncate.
+                _profile_for_score = {
+                    "target_titles":        ud.get("target_titles", ""),
+                    "preferred_industries": ud.get("preferred_industries", ""),
+                    "preferred_locations":  ud.get("preferred_locations", ""),
+                    "target_companies":     ud.get("target_companies", ""),
+                    "min_salary":           ud.get("min_salary", 0),
+                }
+                for _j in jobs:
+                    _j["rule_score"] = rule_based_score(_j, _profile_for_score)
+                jobs.sort(key=lambda j: j.get("rule_score", 0), reverse=True)
+                jobs = jobs[:50]
             else:
                 jobs = []
 
@@ -499,7 +571,10 @@ if st.session_state.get("profile_saved"):
                     "target_titles": ud.get("target_titles", ""),
                     "preferred_locations": ud.get("preferred_locations", ""),
                     "preferred_industries": ud.get("preferred_industries", ""),
+                    "target_companies": ud.get("target_companies", ""),
                     "min_salary": ud.get("min_salary", 0),
+                    "target_ote": ud.get("target_ote", 0),
+                    "match_threshold": ud.get("match_threshold", 50),
                     "looking_for": ud.get("looking_for", ""),
                     "dealbreakers": ud.get("dealbreakers", ""),
                     "resume_summary": ud.get("resume_summary", ""),
@@ -543,6 +618,7 @@ if st.session_state.get("profile_saved"):
                     for job in approved:
                         g = job.get("grade", {})
                         score = int(g.get("match_score", 0) or 0)
+                        action = g.get("recommended_action") or "Maybe"
                         narrative = (g.get("narrative") or "").strip()
                         role_summary = (g.get("role_summary") or "").strip()
                         reasons = [r for r in (g.get("match_reasons") or []) if r and r.strip()]
@@ -550,8 +626,10 @@ if st.session_state.get("profile_saved"):
                         title_text = job.get("title", "Untitled")
                         company_text = job.get("company", "Unknown")
 
+                        # Color-coded action prefix in the expander title
+                        _emoji = {"Apply": "\u2705", "Maybe": "\U0001F914", "Skip": "\u26d4"}.get(action, "")
                         with st.expander(
-                            f"{score}/100  \u2014  {title_text} at {company_text}"
+                            f"{_emoji} {action}  \u00b7  {score}/100  \u2014  {title_text} at {company_text}"
                         ):
                             # 1. Narrative first — the "handpicked for you" hook
                             if narrative:
@@ -594,8 +672,12 @@ if st.session_state.get("profile_saved"):
                                     f"\u2197]({job.get('url')})"
                                 )
                 else:
-                    st.info("No jobs scored 50 or higher. Try broadening your "
-                            "titles, loosening dealbreakers, or scanning again later.")
+                    _user_threshold = ud.get("match_threshold", 50)
+                    st.info(
+                        f"No jobs scored {_user_threshold} or higher. "
+                        "Try broadening your titles, loosening dealbreakers, "
+                        "lowering the match-selectivity slider, or scanning again later."
+                    )
 
                 if graveyard:
                     with st.expander(
