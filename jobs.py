@@ -21,6 +21,37 @@ TIMEOUT = 15
 REMOTE_WORDS = {"remote", "anywhere", "work from home", "wfh"}
 
 
+# Curated Greenhouse board handles — companies that hire across the kinds of
+# roles the existing user base (tech, sales/AE, IT/infra, hospitality/payments)
+# is targeting. Each user's target_companies field is unioned in at scan time.
+# Wrong handles silently 404 and get skipped — no harm done.
+GREENHOUSE_DEFAULT_HANDLES = [
+    # Tech / dev tools
+    "stripe", "anthropic", "openai", "vercel", "cloudflare",
+    "render", "notion", "atlassian", "gitlab", "elastic",
+    "mongodb", "linear", "ramp", "brex",
+    # Sales / B2B SaaS
+    "salesforce", "hubspot", "outreach", "gong", "snowflake",
+    # Payments / hospitality / fintech
+    "shift4", "adyen", "square", "lightspeed", "toast",
+]
+
+
+def _company_handle(name: str) -> str:
+    """Crudely slugify a company name into a likely Greenhouse board handle.
+    e.g. 'Stripe' -> 'stripe', 'Toast Inc.' -> 'toastinc'."""
+    if not name:
+        return ""
+    s = name.strip().lower()
+    s = s.replace("-", " ").replace("_", " ")
+    # Drop common suffixes that wouldn't appear in a handle
+    for suffix in (" inc.", " inc", " llc.", " llc", " ltd.", " ltd", " corp.", " corp"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)]
+    # Keep alphanumeric only
+    return "".join(c for c in s if c.isalnum())
+
+
 def _is_remote(loc):
     return loc.strip().lower() in REMOTE_WORDS
 
@@ -181,61 +212,197 @@ def fetch_jsearch(titles, locations):
     return jobs
 
 
-def fetch_serpapi_google_jobs(titles, locations):
+# JobSpy ([Bunsly/JobSpy], MIT) covers LinkedIn + Glassdoor + ZipRecruiter +
+# Google Jobs in one library. We use lazy import so the module still loads
+# cleanly on systems where python-jobspy isn't installed yet.
+_JOBSPY_SITE_DISPLAY = {
+    "linkedin": "LinkedIn",
+    "glassdoor": "Glassdoor",
+    "zip_recruiter": "ZipRecruiter",
+    "google": "Google Jobs",
+    "indeed": "Indeed",
+}
+
+
+def fetch_via_jobspy(titles, locations, sites=None, results_per_title=15, hours_old=168):
+    """Scrape jobs via JobSpy across multiple boards in one call.
+
+    Default sites: LinkedIn + Glassdoor + ZipRecruiter. Google Jobs is handled
+    separately by fetch_serpapi_google_jobs (which now also routes through
+    JobSpy) so the two functions can be parallelised independently.
+    """
+    if sites is None:
+        sites = ["linkedin", "glassdoor", "zip_recruiter"]
+    try:
+        from jobspy import scrape_jobs
+    except ImportError:
+        print("[jobs] python-jobspy not installed; skipping JobSpy sources.")
+        return []
+
+    # Pick a location for the scrape — JobSpy takes a single string per call.
+    if not locations or all(_is_remote(l) for l in locations):
+        loc = "Remote"
+    else:
+        loc = locations[0]
+
     jobs = []
-    if not SERPAPI_KEY:
-        print("[jobs] SerpAPI key missing, skipping Google Jobs.")
-        return jobs
     for title in titles:
-        if not locations or all(_is_remote(l) for l in locations):
-            query = f"{title} remote jobs"
-        else:
-            query = f"{title} jobs {locations[0]}"
         try:
-            r = requests.get(
-                "https://serpapi.com/search.json",
-                params={
-                    "engine": "google_jobs",
-                    "q": query,
-                    "api_key": SERPAPI_KEY,
-                },
-                timeout=TIMEOUT,
+            df = scrape_jobs(
+                site_name=sites,
+                search_term=title,
+                location=loc,
+                results_wanted=results_per_title,
+                hours_old=hours_old,
+                country_indeed="USA",
+                verbose=0,
             )
-            if r.status_code == 200:
-                for j in r.json().get("jobs_results", []):
-                    apply_opts = j.get("apply_options", []) or []
-                    url = ""
-                    if apply_opts:
-                        url = apply_opts[0].get("link", "") or ""
-                    if not url:
-                        url = j.get("share_link", "") or ""
-                    if not url:
-                        rl = j.get("related_links", []) or []
-                        url = rl[0].get("link", "") if rl else ""
-                    if not url:
-                        continue
-                    jobs.append({
-                        "title": j.get("title", ""),
-                        "company": j.get("company_name", ""),
-                        "location": j.get("location", ""),
-                        "description": j.get("description", "")[:800],
-                        "url": url,
-                        "source": "Google Jobs",
-                    })
         except Exception as e:
-            print(f"[jobs] SerpAPI error ({title}): {e}")
-    print(f"[jobs] Google Jobs: {len(jobs)} jobs")
+            print(f"[jobs] JobSpy error ({title}, {sites}): {str(e)[:140]}")
+            continue
+        if df is None or df.empty:
+            continue
+        for _, row in df.iterrows():
+            url = row.get("job_url_direct") or row.get("job_url") or ""
+            if not url:
+                continue
+            site_key = (row.get("site") or "").lower()
+            jobs.append({
+                "title": str(row.get("title") or "").strip(),
+                "company": str(row.get("company") or "").strip(),
+                "location": str(row.get("location") or "").strip(),
+                "description": (str(row.get("description") or "")[:800]),
+                "url": url,
+                "source": _JOBSPY_SITE_DISPLAY.get(site_key, site_key.title() or "JobSpy"),
+            })
+    print(f"[jobs] JobSpy ({'+'.join(sites)}): {len(jobs)} jobs")
     return jobs
 
 
-def fetch_all_jobs(titles, locations):
+def fetch_serpapi_google_jobs(titles, locations):
+    """Google Jobs via JobSpy (replaces the original SerpAPI implementation).
+
+    Kept under the old function name so any external callers keep working.
+    SerpAPI dependency removed — no more paid API key needed for this source.
+    """
+    return fetch_via_jobspy(titles, locations, sites=["google"], results_per_title=15)
+
+
+def fetch_greenhouse(titles, target_companies=""):
+    """Fetch jobs from Greenhouse public job boards.
+
+    Hits the curated GREENHOUSE_DEFAULT_HANDLES list unioned with any companies
+    in the user's target_companies field. The endpoint is free, no key needed,
+    no rate limit on the public board API. Title filtering is done client-side
+    via the user's target_titles.
+    """
+    import re
+    from html import unescape
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    user_handles = [
+        _company_handle(c) for c in (target_companies or "").split(",") if c.strip()
+    ]
+    # Dedupe while preserving order — defaults first, then user additions
+    seen = set()
+    handles = []
+    for h in list(GREENHOUSE_DEFAULT_HANDLES) + user_handles:
+        if h and h not in seen:
+            seen.add(h)
+            handles.append(h)
+
+    # Build a lowercase keyword set from titles for client-side filtering
+    title_kws = set()
+    for t in (titles or []):
+        for w in t.lower().split():
+            if len(w) > 2:
+                title_kws.add(w)
+
+    def _strip_html(html: str) -> str:
+        if not html:
+            return ""
+        text = unescape(html)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    def _fetch_one(handle):
+        try:
+            r = requests.get(
+                f"https://boards-api.greenhouse.io/v1/boards/{handle}/jobs?content=true",
+                timeout=TIMEOUT,
+                headers={"User-Agent": "Mozilla/5.0 (job-agent)"},
+            )
+            if r.status_code != 200:
+                return []
+            out = []
+            for j in r.json().get("jobs", []):
+                title = (j.get("title") or "").strip()
+                if not title:
+                    continue
+                # Title keyword pre-filter — companies post lots of unrelated roles
+                if title_kws and not any(kw in title.lower() for kw in title_kws):
+                    continue
+                desc = _strip_html(j.get("content", ""))[:800]
+                loc = (j.get("location") or {}).get("name", "")
+                out.append({
+                    "title": title,
+                    "company": handle.replace("-", " ").title(),
+                    "location": loc,
+                    "description": desc,
+                    "url": j.get("absolute_url", ""),
+                    "source": "Greenhouse",
+                })
+            return out
+        except Exception as e:
+            print(f"[jobs] Greenhouse error ({handle}): {str(e)[:120]}")
+            return []
+
+    jobs = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(_fetch_one, h) for h in handles]
+        for fut in as_completed(futures):
+            try:
+                jobs += fut.result()
+            except Exception:
+                pass
+    print(f"[jobs] Greenhouse: {len(jobs)} jobs ({len(handles)} companies queried)")
+    return jobs
+
+
+def fetch_all_jobs(titles, locations, target_companies=""):
+    """Run every fetcher in parallel, dedupe, validate, link-health-check.
+
+    Adding JobSpy + Greenhouse roughly doubled the source count (Adzuna, The
+    Muse, RemoteOK, JSearch, LinkedIn, Glassdoor, ZipRecruiter, Google Jobs,
+    Greenhouse). Running them sequentially would make scans painful, so we
+    fan out with a thread pool.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     print(f"[jobs] Fetching for titles={titles}, locations={locations}")
+    fetchers = [
+        ("Adzuna",     lambda: fetch_adzuna(titles, locations)),
+        ("The Muse",   lambda: fetch_themuse(titles)),
+        ("RemoteOK",   lambda: fetch_remoteok(titles)),
+        ("JSearch",    lambda: fetch_jsearch(titles, locations)),
+        ("Google",     lambda: fetch_serpapi_google_jobs(titles, locations)),
+        ("JobSpy",     lambda: fetch_via_jobspy(titles, locations)),
+        ("Greenhouse", lambda: fetch_greenhouse(titles, target_companies)),
+    ]
+
     raw = []
-    raw += fetch_adzuna(titles, locations)
-    raw += fetch_themuse(titles)
-    raw += fetch_remoteok(titles)
-    raw += fetch_jsearch(titles, locations)
-    raw += fetch_serpapi_google_jobs(titles, locations)
+    with ThreadPoolExecutor(max_workers=len(fetchers)) as pool:
+        futures = {pool.submit(fn): name for name, fn in fetchers}
+        for fut in as_completed(futures):
+            name = futures[fut]
+            try:
+                results = fut.result(timeout=180)
+                if results:
+                    raw += results
+            except Exception as e:
+                print(f"[jobs] {name} fetch failed: {str(e)[:140]}")
+
     deduped = deduplicate(raw)
     validated = validate_jobs(deduped)
     alive = check_link_health(validated)

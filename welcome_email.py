@@ -67,7 +67,7 @@ def send_welcome_email(user_data):
 <tr><td style="padding:10px 30px;">
   <h3 style="color:#1a73e8;margin:0 0 8px;">How It Works</h3>
   <p style="color:#555;line-height:1.6;">
-    We search <b>5 job boards</b> (Adzuna, The Muse, RemoteOK, JSearch, Google Jobs)
+    We search <b>8+ job boards</b> (Adzuna, The Muse, RemoteOK, JSearch, Google Jobs, LinkedIn, Glassdoor, ZipRecruiter, Greenhouse)
     for positions matching your preferences. Each listing is then <b>graded by AI</b>
     (Google Gemini) against your resume and criteria on a 1-5 star scale. Only the best
     matches (scoring 50+ out of 100) make it to your daily email or instant scan results.</p>

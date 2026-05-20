@@ -235,8 +235,11 @@ def run():
             print(f"[autopilot] Skipping {email} - no target titles set")
             continue
 
-        # Fetch jobs from all sources
-        jobs = fetch_all_jobs(titles, locations)
+        # Fetch jobs from all sources (8+ boards via JobSpy + Greenhouse)
+        jobs = fetch_all_jobs(
+            titles, locations,
+            target_companies=profile.get("target_companies", ""),
+        )
         print(f"[autopilot] {len(jobs)} unique listings for {name}")
 
         # Pre-filter obvious mismatches

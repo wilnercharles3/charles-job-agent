@@ -8,7 +8,7 @@
 ## Architecture Overview
 - **app.py** - Streamlit Cloud UI. Profile form, resume upload/paste, Supabase save, welcome email, instant job scan.
 - **autopilot.py** - Headless daily scanner. Runs via GitHub Actions at 5 AM EST. Fetches jobs, grades with AI, emails results.
-- **jobs.py** - Job fetchers for 5 boards (Adzuna, The Muse, RemoteOK, JSearch, Google Jobs). Includes deduplication, URL validation, spam filtering.
+- **jobs.py** - Job fetchers for 8+ boards (Adzuna, The Muse, RemoteOK, JSearch + JobSpy: LinkedIn, Glassdoor, ZipRecruiter, Google Jobs + Greenhouse public board API). Parallel fan-out via ThreadPoolExecutor. Includes deduplication, URL validation, spam filtering, link-health check, rule-based pre-scoring, dealbreaker pre-filter.
 - **grader.py** - Gemini AI grading. Resume summarization, batch grading (3 jobs per API call), 1-5 star rating system.
 - **db.py** - Supabase client. Profile CRUD, sent-jobs tracking, dedup filtering.
 - **welcome_email.py** - HTML welcome email with app link button, tips, example job list, user settings summary.

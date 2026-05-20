@@ -611,10 +611,14 @@ if st.session_state.get("profile_saved"):
         if not title_list:
             st.warning("No job titles found. Please update your profile above.")
         else:
-            with st.spinner("Fetching jobs from 5 job boards... "
-                            "(this may take 15-30 seconds)"):
+            with st.spinner("Fetching jobs from 8+ job boards... "
+                            "(this may take 20-40 seconds)"):
                 try:
-                    raw_jobs = fetch_all_jobs(title_list, loc_list)
+                    raw_jobs = fetch_all_jobs(
+                        title_list,
+                        loc_list,
+                        target_companies=ud.get("target_companies", ""),
+                    )
                 except Exception as e:
                     st.error("Error fetching jobs: " + str(e))
                     raw_jobs = []
