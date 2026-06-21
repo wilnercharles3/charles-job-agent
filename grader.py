@@ -22,7 +22,12 @@ load_dotenv()
 
 # -- Provider configuration -------------------------------------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+# gemini-2.5-flash (not -lite). Lite's free-tier daily allowance was exhausted
+# every morning by ~10:05 UTC and stayed dead the rest of the day. The full
+# flash model has a separate quota pool that's currently healthy. Slightly
+# slower per call (~2x) but higher quality output. Override via env var if
+# the bigger model also gets capped someday.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 gemini = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
