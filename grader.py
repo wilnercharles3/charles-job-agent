@@ -68,8 +68,10 @@ _QUOTA_KILL_PATTERNS = (
     "exceeded your current quota",
     "exceeded your quota",
     "quotaFailure",
-    "rate_limit_exceeded",  # Anthropic phrasing
-    "insufficient_quota",   # generic
+    "rate_limit_exceeded",      # Anthropic phrasing
+    "insufficient_quota",       # generic
+    "credit balance is too low",  # Anthropic billing-empty wording
+    "credits are exhausted",      # OpenAI-style wording
 )
 
 
