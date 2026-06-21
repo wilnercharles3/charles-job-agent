@@ -26,8 +26,13 @@ from grader import grade_all_jobs
 load_dotenv()
 
 # -- Email credentials -------------------------------------------------------
+# Primary Gmail App Password + optional backup. The backup auto-activates if
+# the primary returns 535 Bad Credentials (the exact failure mode that hid for
+# 5 weeks earlier this month). Add GMAIL_APP_PASSWORD_BACKUP to the env to
+# enable the pool; otherwise behaviour is unchanged.
 GMAIL_USER = os.environ.get("GMAIL_USER", "")
 GMAIL_PASS = os.environ.get("GMAIL_APP_PASSWORD", "")
+GMAIL_PASS_BACKUP = os.environ.get("GMAIL_APP_PASSWORD_BACKUP", "")
 
 TODAY = date.today().strftime("%B %d, %Y")
 
@@ -196,30 +201,54 @@ def build_email_html(profile: dict, jobs: list) -> str:
     )
 
 
+def _smtp_send(to_addr: str, msg_str: str, password: str) -> None:
+    """One SMTP attempt. Raises on auth/send failure."""
+    with smtplib.SMTP("smtp.gmail.com", 587) as smtp:
+        smtp.ehlo()
+        smtp.starttls()
+        smtp.login(GMAIL_USER, password)
+        smtp.sendmail(GMAIL_USER, to_addr, msg_str)
+
+
 def send_email(to_addr: str, subject: str, html_body: str) -> None:
+    """Send via Gmail SMTP. If the primary App Password returns 535 Bad
+    Credentials and a backup is configured, transparently retry with the
+    backup. Catches the exact silent-failure mode that hid for 5 weeks."""
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = GMAIL_USER
     msg["To"] = to_addr
     msg.attach(MIMEText(html_body, "html"))
+    msg_str = msg.as_string()
 
-    with smtplib.SMTP("smtp.gmail.com", 587) as smtp:
-        smtp.ehlo()
-        smtp.starttls()
-        smtp.login(GMAIL_USER, GMAIL_PASS)
-        smtp.sendmail(GMAIL_USER, to_addr, msg.as_string())
+    try:
+        _smtp_send(to_addr, msg_str, GMAIL_PASS)
+    except smtplib.SMTPAuthenticationError as auth_err:
+        if not GMAIL_PASS_BACKUP:
+            raise
+        print(f"[autopilot] Primary Gmail App Password rejected ({auth_err.smtp_code}); trying backup.")
+        _smtp_send(to_addr, msg_str, GMAIL_PASS_BACKUP)
 
 
 # -- Main --------------------------------------------------------------------
 def run():
     if not GMAIL_USER or not GMAIL_PASS:
         print("[autopilot] Gmail credentials missing - cannot send emails.")
-        return
+        # This is itself a hard failure: secrets are misconfigured.
+        raise SystemExit(2)
 
     print(f"[autopilot] Starting daily scan - {TODAY}")
 
     raw_profiles = load_all_profiles()
     print(f"[autopilot] {len(raw_profiles)} user profile(s) found")
+
+    # Outcome counters — used at end of run() for self-monitoring.
+    email_sent_count = 0
+    email_failed_count = 0
+    skip_no_titles = 0
+    skip_no_new_jobs = 0
+    skip_no_approved = 0
+    quota_exhausted_any_user = False
 
     for raw in raw_profiles:
         profile = normalise_profile(raw)
@@ -233,6 +262,7 @@ def run():
 
         if not titles:
             print(f"[autopilot] Skipping {email} - no target titles set")
+            skip_no_titles += 1
             continue
 
         # Fetch jobs from all sources (8+ boards via JobSpy + Greenhouse)
@@ -268,18 +298,24 @@ def run():
 
         if not jobs:
             print(f"[autopilot] No new jobs - skipping email for {name}")
+            skip_no_new_jobs += 1
             continue
 
-        # Grade with AI
+        # Grade with AI (multi-provider chain: Gemini -> Anthropic -> Ollama)
         approved, graveyard, quota_exhausted = grade_all_jobs(jobs, profile)
         print(f"[autopilot] {len(approved)} approved, {len(graveyard)} rejected for {name}")
 
         if quota_exhausted:
-            print(f"[autopilot] Gemini quota exhausted - skipping remaining users.")
-            break
+            print(f"[autopilot] All LLM providers exhausted - stopping further grading.")
+            quota_exhausted_any_user = True
+            # Don't break — continue with the matches already approved (if any)
+            # so the user still gets whatever surfaced before quota died.
 
         if not approved:
             print(f"[autopilot] No strong matches - skipping email for {name}")
+            skip_no_approved += 1
+            if quota_exhausted:
+                break  # no point processing the next user
             continue
 
         # Send email
@@ -290,10 +326,40 @@ def run():
             send_email(email, subject, html)
             print(f"[autopilot] Email sent to {email}")
             mark_jobs_sent(email, approved)
+            email_sent_count += 1
         except Exception as e:
             print(f"[autopilot] Email failed for {email}: {e}")
+            email_failed_count += 1
 
-    print("[autopilot] Daily scan complete.")
+    # -- Self-monitoring -----------------------------------------------------
+    # End-of-run summary, plus a hard outcome assertion. If we processed
+    # profiles but shipped zero emails, the workflow exits non-zero so
+    # GitHub Actions auto-emails the operator instead of silently passing.
+    active_profiles = len(raw_profiles) - skip_no_titles
+    print()
+    print(f"[autopilot] === run summary ===")
+    print(f"[autopilot] profiles:            {len(raw_profiles)}")
+    print(f"[autopilot] skipped (no titles): {skip_no_titles}")
+    print(f"[autopilot] skipped (no jobs):   {skip_no_new_jobs}")
+    print(f"[autopilot] skipped (0 approved):{skip_no_approved}")
+    print(f"[autopilot] emails sent:         {email_sent_count}")
+    print(f"[autopilot] emails failed:       {email_failed_count}")
+    print(f"[autopilot] quota_exhausted:     {quota_exhausted_any_user}")
+    print(f"[autopilot] === Daily scan complete ===")
+
+    if active_profiles > 0 and email_sent_count == 0:
+        # Outcome assertion: had real users to email, sent zero. This is the
+        # exact silent-failure pattern that hid for 5 weeks. Fail loud so
+        # GitHub Actions notifies the operator.
+        print()
+        print(f"[autopilot] !!! ALERT: had {active_profiles} active profile(s) "
+              f"but sent 0 emails. Workflow will exit non-zero.")
+        if quota_exhausted_any_user:
+            print(f"[autopilot] !!! likely cause: LLM provider quota exhausted")
+        if email_failed_count > 0:
+            print(f"[autopilot] !!! likely cause: SMTP send failed "
+                  f"({email_failed_count} attempts)")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

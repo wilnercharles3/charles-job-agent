@@ -1,78 +1,246 @@
 """
-grader.py - AI grading with Gemini, resume summarization, and batch processing.
+grader.py - AI grading with multi-LLM fallback chain.
 
-Shared module used by both app.py and autopilot.py.
-Handles all Gemini AI interactions: resume summarization and job grading.
+Provider order (each falls back on QuotaExhausted or RuntimeError):
+  1. Google Gemini   (GEMINI_API_KEY, default model gemini-2.5-flash-lite)
+  2. Anthropic Claude (ANTHROPIC_API_KEY, default claude-haiku-4-5-20251001)
+  3. Ollama local    (http://localhost:11434, default gemma3:4b)
+
+Each provider is independently kill-switched per-run so one dead provider
+doesn't drag down the others.
 """
 
 import json
 import os
 import re
 import time
+import requests
 from google import genai
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# -- Provider configuration -------------------------------------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 gemini = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-MODEL = "gemini-2.5-flash-lite"  # higher free-tier quota than 2.0-flash
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+_anthropic_client = None
+if ANTHROPIC_API_KEY:
+    try:
+        from anthropic import Anthropic
+        _anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    except ImportError:
+        print("[grader] anthropic package not installed; Anthropic fallback disabled.")
+
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:4b")
+
 GRADE_DELAY = 1.5   # seconds between grading calls
 BATCH_SIZE = 3      # jobs per grading call
 MAX_429_WAIT = 30   # max seconds to wait on a rate-limit hint before giving up
 
-# Module-level quota kill switch. Reset per grade_all_jobs() invocation so
-# repeated UI scans after a cool-down get another chance.
+# Per-provider kill switches. Set when that provider exhausts quota; reset per
+# grade_all_jobs() invocation. Skipping a dead provider lets the next in the
+# chain take over without retrying-to-fail every call.
+_gemini_dead = False
+_anthropic_dead = False
+_ollama_dead = False
+
+# Legacy alias kept for backwards-compat with any external script that may
+# import _quota_dead from this module. Reflects the Gemini status only.
 _quota_dead = False
 
 
 class QuotaExhausted(Exception):
-    """Raised when Gemini reports free-tier quota is 0 (not just throttled)."""
+    """Raised when ALL configured LLM providers have exhausted their quota."""
+
+
+# Substrings that, when present in an error message, indicate the provider's
+# quota is exhausted for this run (not just a transient rate-limit). Broader
+# than the original Gemini-specific match so today's "You exceeded your current
+# quota" wording trips the flag.
+_QUOTA_KILL_PATTERNS = (
+    "limit: 0",
+    "free_tier",
+    "exceeded your current quota",
+    "exceeded your quota",
+    "quotaFailure",
+    "rate_limit_exceeded",  # Anthropic phrasing
+    "insufficient_quota",   # generic
+)
 
 
 def _parse_retry_delay(err_msg: str) -> float | None:
-    """Extract 'Please retry in 2.30s' hint from a Gemini error message."""
+    """Extract 'Please retry in 2.30s' hint from an error message."""
     m = re.search(r'retry in (\d+(?:\.\d+)?)s', err_msg)
     return float(m.group(1)) if m else None
 
 
-def _call_gemini(prompt: str, max_wait: float = MAX_429_WAIT) -> str:
-    """Single Gemini call with smart 429 handling.
+def _is_quota_kill(msg: str) -> bool:
+    return any(p in msg for p in _QUOTA_KILL_PATTERNS)
 
-    - On hard quota kill (limit: 0 on free-tier): trip _quota_dead, raise QuotaExhausted.
-    - On soft 429 with retry hint: wait the hinted duration once, retry, then give up.
-    - On other errors: one-line log, re-raise.
-    - Returns the raw response.text.
-    """
-    global _quota_dead
-    if _quota_dead:
-        raise QuotaExhausted("Free-tier quota exhausted this run")
+
+# -- Provider: Gemini -------------------------------------------------------
+
+def _call_gemini(prompt: str, max_wait: float = MAX_429_WAIT) -> str:
+    """Single Gemini call with smart 429 handling."""
+    global _gemini_dead, _quota_dead
+    if _gemini_dead:
+        raise QuotaExhausted("Gemini quota exhausted this run")
     if not gemini:
         raise RuntimeError("Gemini client not configured")
 
     for attempt in (1, 2):
         try:
-            r = gemini.models.generate_content(model=MODEL, contents=prompt)
+            r = gemini.models.generate_content(model=GEMINI_MODEL, contents=prompt)
             return r.text
         except Exception as e:
             msg = str(e)
-            if "limit: 0" in msg and "free_tier" in msg:
-                _quota_dead = True
-                print("[grader] Gemini free-tier quota exhausted — short-circuiting.")
+            if _is_quota_kill(msg):
+                _gemini_dead = True
+                _quota_dead = True  # back-compat alias
+                print("[grader] Gemini quota exhausted — falling back to next provider.")
                 raise QuotaExhausted(msg) from e
             if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
                 hint = _parse_retry_delay(msg)
                 if attempt == 1 and hint is not None and hint <= max_wait:
-                    print(f"[grader] 429, waiting {hint:.0f}s (server hint)")
+                    print(f"[grader] Gemini 429, waiting {hint:.0f}s (server hint)")
                     time.sleep(hint)
                     continue
-                print(f"[grader] 429, giving up (hint={hint}, max_wait={max_wait})")
+                print(f"[grader] Gemini 429, giving up (hint={hint}, max_wait={max_wait})")
                 raise
-            print(f"[grader] Error: {msg[:140]}")
+            print(f"[grader] Gemini error: {msg[:140]}")
             raise
 
     raise RuntimeError("unreachable")
+
+
+# -- Provider: Anthropic Claude ---------------------------------------------
+
+def _call_anthropic(prompt: str, max_wait: float = MAX_429_WAIT) -> str:
+    """Anthropic Claude fallback. Same prompt-in / text-out contract as Gemini."""
+    global _anthropic_dead
+    if _anthropic_dead:
+        raise QuotaExhausted("Anthropic quota exhausted this run")
+    if not _anthropic_client:
+        raise RuntimeError("Anthropic client not configured (ANTHROPIC_API_KEY unset)")
+
+    for attempt in (1, 2):
+        try:
+            msg = _anthropic_client.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=2048,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            # content is a list of blocks; first block is text for our prompts
+            return msg.content[0].text
+        except Exception as e:
+            err = str(e)
+            if _is_quota_kill(err):
+                _anthropic_dead = True
+                print("[grader] Anthropic quota exhausted — falling back to next provider.")
+                raise QuotaExhausted(err) from e
+            if "429" in err or "overloaded" in err.lower():
+                hint = _parse_retry_delay(err)
+                if attempt == 1 and hint is not None and hint <= max_wait:
+                    print(f"[grader] Anthropic 429, waiting {hint:.0f}s")
+                    time.sleep(hint)
+                    continue
+                print(f"[grader] Anthropic 429, giving up")
+                raise
+            print(f"[grader] Anthropic error: {err[:140]}")
+            raise
+
+
+# -- Provider: Ollama (local) -----------------------------------------------
+
+_ollama_alive_checked = False
+_ollama_alive_cached = False
+
+
+def _ollama_alive() -> bool:
+    """Cheap one-second check: is the local Ollama server reachable? Cached."""
+    global _ollama_alive_checked, _ollama_alive_cached
+    if _ollama_alive_checked:
+        return _ollama_alive_cached
+    try:
+        r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=1.0)
+        _ollama_alive_cached = (r.status_code == 200)
+    except Exception:
+        _ollama_alive_cached = False
+    _ollama_alive_checked = True
+    return _ollama_alive_cached
+
+
+def _call_ollama(prompt: str, max_wait: float = MAX_429_WAIT) -> str:
+    """Local Ollama fallback. Slow but free and quota-immune."""
+    global _ollama_dead
+    if _ollama_dead:
+        raise QuotaExhausted("Ollama unavailable this run")
+    if not _ollama_alive():
+        _ollama_dead = True
+        raise RuntimeError("Ollama not reachable at " + OLLAMA_URL)
+
+    try:
+        r = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"num_ctx": 8192, "temperature": 0.2},
+            },
+            timeout=180,
+        )
+        if r.status_code != 200:
+            print(f"[grader] Ollama HTTP {r.status_code}: {r.text[:140]}")
+            raise RuntimeError(f"Ollama returned {r.status_code}")
+        body = r.json()
+        return body.get("response", "")
+    except Exception as e:
+        print(f"[grader] Ollama error: {str(e)[:140]}")
+        raise
+
+
+# -- Multi-provider router --------------------------------------------------
+
+def _call_llm(prompt: str, max_wait: float = MAX_429_WAIT) -> str:
+    """Try each configured LLM provider in order. Return text from the first
+    success. Raise QuotaExhausted only if every provider is dead this run."""
+    providers = [
+        ("gemini", _call_gemini, _gemini_dead),
+        ("anthropic", _call_anthropic, _anthropic_dead),
+        ("ollama", _call_ollama, _ollama_dead),
+    ]
+    last_exc: Exception | None = None
+    for name, fn, _ in providers:
+        try:
+            return fn(prompt, max_wait=max_wait)
+        except QuotaExhausted as e:
+            last_exc = e
+            continue  # try next provider
+        except RuntimeError as e:
+            # Provider not configured or unreachable — skip to next without
+            # treating it as a quota event for the chain.
+            last_exc = e
+            continue
+        except Exception as e:
+            # Real error on this provider (parse failure, 5xx, etc.). The
+            # individual provider already printed a one-line log. Try next.
+            last_exc = e
+            continue
+    # Every provider failed.
+    raise QuotaExhausted(
+        "All LLM providers unavailable this run. Last error: " + str(last_exc)[:200]
+    )
+
+
+# Backwards-compat alias: any internal callsite that still wants Gemini-only
+# can use _call_gemini directly; the new _call_llm is the default.
+
 
 
 # -- Resume Parsing (runs on upload to pre-fill form fields) -----------------
@@ -128,7 +296,7 @@ def suggest_resume_label(resume_text: str) -> str:
         f"RESUME:\n{resume_text[:3000]}"
     )
     try:
-        text = _call_gemini(prompt)
+        text = _call_llm(prompt)
     except QuotaExhausted:
         return ""
     except Exception as e:
@@ -189,7 +357,7 @@ def parse_resume_to_profile(resume_text: str) -> dict:
     )
 
     try:
-        text = _call_gemini(prompt)
+        text = _call_llm(prompt)
         data = json.loads(_clean_json_response(text))
     except QuotaExhausted:
         return {}
@@ -233,7 +401,7 @@ def summarize_resume(resume_text: str) -> str:
     )
 
     try:
-        text = _call_gemini(prompt)
+        text = _call_llm(prompt)
         return text.strip()
     except QuotaExhausted:
         return ""
@@ -429,7 +597,7 @@ def grade_single(job: dict, profile: dict) -> dict:
 
     prompt = _build_grade_prompt(job, profile)
     try:
-        text = _call_gemini(prompt)
+        text = _call_llm(prompt)
         return json.loads(_clean_json_response(text))
     except QuotaExhausted:
         return dict(RATE_LIMITED_GRADE)
@@ -522,7 +690,7 @@ def grade_batch(jobs_batch: list, profile: dict) -> list:
 
     prompt = _build_batch_prompt(jobs_batch, profile)
     try:
-        text = _call_gemini(prompt)
+        text = _call_llm(prompt)
         results = json.loads(_clean_json_response(text))
         if isinstance(results, list) and len(results) == len(jobs_batch):
             return results
@@ -544,8 +712,15 @@ def grade_all_jobs(jobs: list, profile: dict, on_progress=None) -> tuple:
     Returns (approved_jobs, graveyard_jobs, quota_exhausted: bool).
     on_progress(current, total) is called after each batch if provided.
     """
-    global _quota_dead
-    _quota_dead = False  # reset per invocation — quota may have replenished
+    global _quota_dead, _gemini_dead, _anthropic_dead, _ollama_dead, _ollama_alive_checked
+    # Reset all per-provider kill switches per invocation — any of them may
+    # have recovered between runs (Gemini quota tick, Anthropic rate window,
+    # Ollama service restart). The Ollama alive-check cache also resets.
+    _quota_dead = False
+    _gemini_dead = False
+    _anthropic_dead = False
+    _ollama_dead = False
+    _ollama_alive_checked = False
 
     # Per-profile threshold (set by user via match-selectivity slider).
     # Falls back to the module default if missing or invalid.
@@ -576,8 +751,11 @@ def grade_all_jobs(jobs: list, profile: dict, on_progress=None) -> tuple:
         if on_progress:
             on_progress(min(i + BATCH_SIZE, total), total)
 
-        # If quota died mid-loop, mark remaining jobs as rate-limited and stop.
-        if _quota_dead and i + BATCH_SIZE < total:
+        # If ALL providers are dead mid-loop, mark remaining jobs as
+        # rate-limited and stop. (_call_llm only raises QuotaExhausted when
+        # every provider has tripped, so this means we have no more options.)
+        all_dead = _gemini_dead and _anthropic_dead and _ollama_dead
+        if all_dead and i + BATCH_SIZE < total:
             for remaining in jobs[i + BATCH_SIZE:]:
                 _stub = dict(RATE_LIMITED_GRADE)
                 _stub["recommended_action"] = "Skip"
@@ -592,4 +770,8 @@ def grade_all_jobs(jobs: list, profile: dict, on_progress=None) -> tuple:
     # Sort approved: highest match_score first
     approved.sort(key=lambda j: j["grade"].get("match_score", 0), reverse=True)
 
-    return approved, graveyard, _quota_dead
+    # quota_exhausted in the return tuple now means "all providers dead",
+    # not just Gemini. _quota_dead alias mirrors the Gemini status for any
+    # legacy reader.
+    all_dead = _gemini_dead and _anthropic_dead and _ollama_dead
+    return approved, graveyard, all_dead
